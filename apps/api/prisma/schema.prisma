@@ -256,3 +256,83 @@ model JournalLine {
 
   @@index([tenantId, accountId])
 }
+
+model Supplier {
+  id        String   @id @default(uuid())
+  tenantId  String
+  name      String
+  email     String?
+  phone     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant    Tenant @relation(fields: [tenantId], references: [id])
+  purchaseOrders PurchaseOrder[]
+}
+
+model PurchaseOrder {
+  id         String   @id @default(uuid())
+  tenantId   String
+  supplierId String
+  status     PurchaseOrderStatus @default(DRAFT)
+  total      Decimal  @db.Numeric(12,2)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  tenant     Tenant   @relation(fields: [tenantId], references: [id])
+  supplier   Supplier @relation(fields: [supplierId], references: [id])
+  lines      PurchaseOrderLine[]
+}
+
+model PurchaseOrderLine {
+  id            String   @id @default(uuid())
+  purchaseOrderId String
+  productId      String
+  name           String
+  qty            Int
+  unitCost       Decimal  @db.Numeric(12,2)
+  lineTotal      Decimal  @db.Numeric(12,2)
+
+  purchaseOrder  PurchaseOrder @relation(fields: [purchaseOrderId], references: [id])
+  product        Product       @relation(fields: [productId], references: [id])
+}
+
+enum PurchaseOrderStatus {
+  DRAFT
+  APPROVED
+  RECEIVED
+  CANCELLED
+}
+
+model InventoryCostLayer {
+  id        String   @id @default(uuid())
+  tenantId  String
+  productId String
+  // remaining quantity in this layer
+  remainingQty Int
+  unitCost  Decimal  @db.Numeric(12,2)
+  source    String? // e.g. PO_RECEIPT:<poId>
+  createdAt DateTime @default(now())
+
+  tenant    Tenant  @relation(fields: [tenantId], references: [id])
+  product   Product @relation(fields: [productId], references: [id])
+
+  @@index([tenantId, productId, createdAt])
+}
+
+model CogsEntry {
+  id         String   @id @default(uuid())
+  tenantId   String
+  invoiceId  String
+  productId  String
+  qty        Int
+  unitCost   Decimal  @db.Numeric(12,2)
+  totalCost  Decimal  @db.Numeric(12,2)
+  createdAt  DateTime @default(now())
+
+  tenant     Tenant  @relation(fields: [tenantId], references: [id])
+  invoice    Invoice @relation(fields: [invoiceId], references: [id])
+  product    Product @relation(fields: [productId], references: [id])
+
+  @@index([tenantId, invoiceId])
+}

@@ -4,11 +4,16 @@ import { CreateCustomerDto } from './dto/create-customer.dto';
 import { CreateInvoiceDto } from './dto/create-invoice.dto';
 import { JobsService } from '../jobs/jobs.service';
 import { AccountingService } from '../accounting/accounting.service';
-
+import { FifoService } from '../inventory/fifo.service';
 
 @Injectable()
 export class SalesService {
-    constructor(private readonly prisma: PrismaService) {}
+    constructor(
+        private readonly prisma: PrismaService,
+        private readonly jobs: JobsService,
+        private readonly accounting: AccountingService,
+        private readonly fifo: FifoService
+    ) {}
 
     createCustomer(tenantId: string, dto: CreateCustomerDto) {
         return this.prisma.customer.create({
@@ -65,26 +70,48 @@ export class SalesService {
     }
 
     async markInvoiceSent(tenantId: string, invoiceId: string) {
-        const inv = await this.prisma.invoice.findFirst({ where: { id: invoiceId, tenantId } });
+        const inv = await this.prisma.invoice.findFirst({
+            where: { id: invoiceId, tenantId },
+            include: { lines: true }
+        });
         if (!inv) throw new BadRequestException('Invoice not found');
+        if (inv.status !== 'DRAFT') throw new BadRequestException('Only DRAFT invoices can be sent');
 
+        // 1) Update invoice status
         const updated = await this.prisma.invoice.update({
             where: { id: invoiceId },
-            data: { status: 'SENT' }
+            data: { status: 'SENT' },
+            include: { lines: true }
         });
 
+        // 2) Inventory + FIFO COGS (only for lines linked to products)
+        for (const line of updated.lines) {
+            if (!line.productId) continue;
+
+            await this.prisma.stockMovement.create({
+                data: {
+                    tenantId,
+                    productId: line.productId,
+                    type: 'OUT',
+                    quantity: line.qty,
+                    note: `INVOICE:${invoiceId}`
+                }
+            });
+
+            await this.fifo.consumeForInvoiceLine({
+                tenantId,
+                invoiceId,
+                productId: line.productId,
+                qty: line.qty
+            });
+        }
+
+        // 3) Enqueue Google invoice send job
         await this.jobs.enqueueInvoiceSend({ tenantId, invoiceId });
 
         return updated;
     }
 
-
-// constructor
-constructor(
-    private readonly prisma: PrismaService,
-    private readonly jobs: JobsService,
-    private readonly accounting: AccountingService
-) {}
 
 // method
 async createPayment(tenantId: string, invoiceId: string, amount: number, method: string) {

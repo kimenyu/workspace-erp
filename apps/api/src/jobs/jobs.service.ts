@@ -30,4 +30,17 @@ export class JobsService {
             removeOnFail: 2000
         });
     }
+
+    async scheduleNightlyInventoryExport(tenantId: string) {
+        // Daily at 02:00 (server time). Adjust as you like.
+        return this.googleQueue.add(
+            'inventory.export.nightly',
+            { tenantId },
+            {
+                repeat: { pattern: '0 2 * * *' }, // cron
+                removeOnComplete: 1000,
+                removeOnFail: 2000
+            }
+        );
+    }
 }

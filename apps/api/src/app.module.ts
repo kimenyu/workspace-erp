@@ -13,6 +13,8 @@ import { SalesModule } from './sales/sales.module';
 import { JobsModule } from './jobs/jobs.module';
 import { GoogleModule } from './integrations/google/google.module';
 import { AccountingModule } from './accounting/accounting.module';
+import { PurchasingModule } from './purchasing/purchasing.module';
+import { ReportsModule } from './reports/reports.module';
 
 @Module({
   imports: [
@@ -27,7 +29,9 @@ import { AccountingModule } from './accounting/accounting.module';
     JobsModule,
     SalesModule,
     GoogleModule,
-    AccountingModule
+    AccountingModule,
+    PurchasingModule,
+    ReportsModule
   ],
   providers: [
     { provide: APP_INTERCEPTOR, useClass: AuditInterceptor }

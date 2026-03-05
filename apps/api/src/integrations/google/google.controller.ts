@@ -18,4 +18,10 @@ export class GoogleController {
     exportInventory(@Req() req: any) {
         return this.jobs.enqueueInventoryExport({ tenantId: req.tenantId });
     }
+
+    @Post('inventory/schedule-nightly')
+    @RequirePerms('inventory.read')
+    scheduleNightly(@Req() req: any) {
+        return this.jobs.scheduleNightlyInventoryExport(req.tenantId);
+    }
 }

@@ -45,6 +45,8 @@ export class AuthService {
             'users.read', 'users.write',
             'inventory.read', 'inventory.write',
             'sales.read', 'sales.write',
+            'purchasing.read', 'purchasing.write',
+            'reports.read',
             'audit.read'
         ];
 
