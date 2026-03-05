@@ -2,6 +2,7 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import { PrismaService } from '../config/prisma.service';
 import { CreateCustomerDto } from './dto/create-customer.dto';
 import { CreateInvoiceDto } from './dto/create-invoice.dto';
+import { JobsService } from '../jobs/jobs.service';
 
 @Injectable()
 export class SalesService {
@@ -65,9 +66,13 @@ export class SalesService {
         const inv = await this.prisma.invoice.findFirst({ where: { id: invoiceId, tenantId } });
         if (!inv) throw new BadRequestException('Invoice not found');
 
-        return this.prisma.invoice.update({
+        const updated = await this.prisma.invoice.update({
             where: { id: invoiceId },
             data: { status: 'SENT' }
         });
+
+        await this.jobs.enqueueInvoiceSend({ tenantId, invoiceId });
+
+        return updated;
     }
 }

@@ -10,6 +10,8 @@ import { AuditModule } from './audit/audit.module';
 import { AuditInterceptor } from './audit/audit.interceptor';
 import { InventoryModule } from './inventory/inventory.module';
 import { SalesModule } from './sales/sales.module';
+import { JobsModule } from './jobs/jobs.module';
+import { GoogleModule } from './integrations/google/google.module';
 
 @Module({
   imports: [
@@ -21,7 +23,9 @@ import { SalesModule } from './sales/sales.module';
     RbacModule,
     InventoryModule,
     AuditModule,
-    SalesModule
+    JobsModule,
+    SalesModule,
+    GoogleModule
   ],
   providers: [
     { provide: APP_INTERCEPTOR, useClass: AuditInterceptor }
