@@ -15,7 +15,7 @@ model Tenant {
 
   googleDriveFolderId String?
   inventorySheetId    String?
-
+  inventoryLastExportedAt DateTime?
 
   users          UserTenant[]
   roles          Role[]
@@ -167,6 +167,7 @@ model Invoice {
 
   driveDocFileId String?
   drivePdfFileId String?
+  invoiceEmailSentAt DateTime?
 
   tenant   Tenant        @relation(fields: [tenantId], references: [id])
   customer Customer      @relation(fields: [customerId], references: [id])
