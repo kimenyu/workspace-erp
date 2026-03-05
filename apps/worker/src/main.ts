@@ -2,33 +2,28 @@ import 'dotenv/config';
 import { Worker } from 'bullmq';
 import { createRedisConnection } from './redis.connection';
 import { GOOGLE_JOBS, JOB_QUEUES } from './jobs.types';
-
-// In this first worker version, we call back into the API via HTTP would be ideal,
-// but to keep it copy/paste we process by calling your API endpoints in the next chunk.
-// For now, we’ll just log job payloads to prove the worker wiring works.
+import { prisma } from './db/prisma';
+import { GoogleErpWorker } from './google.erp.worker';
 
 const connection = createRedisConnection();
 
 async function start() {
     // eslint-disable-next-line no-console
-    console.log('Worker starting...');
+    console.log('Worker starting (DB + Google enabled)...');
+
+    const googleErp = new GoogleErpWorker();
 
     const w = new Worker(
         JOB_QUEUES.GOOGLE,
         async (job) => {
-            // eslint-disable-next-line no-console
-            console.log(`Processing job: ${job.name}`, job.data);
-
-            // NEXT CHUNK: implement real processing by calling the API internal service
-            // or reading DB. For now: keep the pipeline wired.
             if (job.name === GOOGLE_JOBS.INVOICE_SEND) {
-                // placeholder
-                return { ok: true };
+                const { tenantId, invoiceId } = job.data as { tenantId: string; invoiceId: string };
+                return googleErp.sendInvoiceEmail(tenantId, invoiceId);
             }
 
             if (job.name === GOOGLE_JOBS.INVENTORY_EXPORT) {
-                // placeholder
-                return { ok: true };
+                const { tenantId } = job.data as { tenantId: string };
+                return googleErp.exportInventoryToSheet(tenantId);
             }
 
             return { ok: true };
@@ -36,19 +31,29 @@ async function start() {
         { connection }
     );
 
-    w.on('completed', (job) => {
+    w.on('completed', (job, res) => {
         // eslint-disable-next-line no-console
-        console.log(`Completed: ${job.id} ${job.name}`);
+        console.log(`Completed: ${job.id} ${job.name}`, res);
     });
 
     w.on('failed', (job, err) => {
         // eslint-disable-next-line no-console
         console.error(`Failed: ${job?.id} ${job?.name}`, err);
     });
+
+    // Graceful shutdown
+    process.on('SIGINT', async () => {
+        // eslint-disable-next-line no-console
+        console.log('Shutting down...');
+        await w.close();
+        await prisma.$disconnect();
+        process.exit(0);
+    });
 }
 
-start().catch((e) => {
+start().catch(async (e) => {
     // eslint-disable-next-line no-console
     console.error(e);
+    await prisma.$disconnect().catch(() => undefined);
     process.exit(1);
 });
