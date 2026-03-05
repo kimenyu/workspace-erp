@@ -17,6 +17,57 @@ function encodeMessageToBase64Url(str: string) {
         .replace(/=+$/, '');
 }
 
+function base64UrlEncode(buf: Buffer) {
+    return buf
+        .toString('base64')
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=+$/, '');
+}
+
+function buildMimeWithPdfAttachment(args: {
+    to: string;
+    subject: string;
+    text: string;
+    filename: string;
+    pdfBytes: Buffer;
+}) {
+    const boundary = `----=_Part_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+
+    const headers = [
+        `To: ${args.to}`,
+        `Subject: ${args.subject}`,
+        `MIME-Version: 1.0`,
+        `Content-Type: multipart/mixed; boundary="${boundary}"`
+    ].join('\r\n');
+
+    const textPart = [
+        `--${boundary}`,
+        `Content-Type: text/plain; charset="UTF-8"`,
+        `Content-Transfer-Encoding: 7bit`,
+        ``,
+        args.text
+    ].join('\r\n');
+
+    // Gmail accepts base64url raw; inside MIME, attachment usually base64 (not base64url)
+    const attachmentBase64 = args.pdfBytes.toString('base64');
+
+    const attachmentPart = [
+        `--${boundary}`,
+        `Content-Type: application/pdf; name="${args.filename}"`,
+        `Content-Disposition: attachment; filename="${args.filename}"`,
+        `Content-Transfer-Encoding: base64`,
+        ``,
+        attachmentBase64
+    ].join('\r\n');
+
+    const end = `--${boundary}--`;
+
+    const mime = [headers, '', textPart, '', attachmentPart, '', end, ''].join('\r\n');
+    return mime;
+}
+
+
 export class GoogleErpWorker {
     private auth = createGoogleAuth(SCOPES);
 
@@ -50,6 +101,15 @@ export class GoogleErpWorker {
 
         return folderId;
     }
+
+    async downloadDriveFileBytes(fileId: string): Promise<Buffer> {
+        const res = await this.drive.files.get(
+            { fileId, alt: 'media' },
+            { responseType: 'arraybuffer' }
+        );
+        return Buffer.from(res.data as ArrayBuffer);
+    }
+
 
     async generateInvoicePdfToDrive(tenantId: string, invoiceId: string) {
         const invoice = await prisma.invoice.findFirst({
@@ -149,28 +209,31 @@ export class GoogleErpWorker {
 
         const to = invoice.customer.email;
         const subject = `Invoice ${invoice.id}`;
-        const body = [
+
+        const text = [
             `Hello ${invoice.customer.name},`,
             ``,
-            `Your invoice is ready.`,
-            artifact.link
-                ? `View/Download: ${artifact.link}`
-                : `Drive file id: ${artifact.pdfId}`,
+            `Please find your invoice attached as a PDF.`,
             ``,
             `Thank you.`
         ].join('\n');
 
-        const raw = [
-            `To: ${to}`,
-            `Subject: ${subject}`,
-            `Content-Type: text/plain; charset="UTF-8"`,
-            ``,
-            body
-        ].join('\r\n');
+        const pdfId = artifact.pdfId;
+        if (!pdfId) throw new Error('Invoice PDF missing');
+
+        const pdfBytes = await this.downloadDriveFileBytes(pdfId);
+
+        const mime = buildMimeWithPdfAttachment({
+            to,
+            subject,
+            text,
+            filename: `Invoice-${invoice.id}.pdf`,
+            pdfBytes
+        });
 
         await this.gmail.users.messages.send({
             userId: 'me',
-            requestBody: { raw: encodeMessageToBase64Url(raw) }
+            requestBody: { raw: base64UrlEncode(Buffer.from(mime, 'utf-8')) }
         });
 
         // Mark as emailed (idempotency checkpoint)

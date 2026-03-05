@@ -6,6 +6,7 @@ import { RequirePerms } from '../rbac/require-perms.decorator';
 import { SalesService } from './sales.service';
 import { CreateCustomerDto } from './dto/create-customer.dto';
 import { CreateInvoiceDto } from './dto/create-invoice.dto';
+import { CreatePaymentDto } from './dto/create-payment.dto';
 
 @Controller('sales')
 @UseGuards(TenantGuard, JwtAuthGuard, RbacGuard)
@@ -40,5 +41,11 @@ export class SalesController {
     @RequirePerms('sales.write')
     markSent(@Req() req: any, @Param('invoiceId') invoiceId: string) {
         return this.sales.markInvoiceSent(req.tenantId, invoiceId);
+    }
+
+    @Post('payments')
+    @RequirePerms('sales.write')
+    createPayment(@Req() req: any, @Body() dto: CreatePaymentDto) {
+        return this.sales.createPayment(req.tenantId, dto.invoiceId, dto.amount, dto.method);
     }
 }

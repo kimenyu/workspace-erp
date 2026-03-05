@@ -3,6 +3,8 @@ import { PrismaService } from '../config/prisma.service';
 import { CreateCustomerDto } from './dto/create-customer.dto';
 import { CreateInvoiceDto } from './dto/create-invoice.dto';
 import { JobsService } from '../jobs/jobs.service';
+import { AccountingService } from '../accounting/accounting.service';
+
 
 @Injectable()
 export class SalesService {
@@ -75,4 +77,44 @@ export class SalesService {
 
         return updated;
     }
+
+
+// constructor
+constructor(
+    private readonly prisma: PrismaService,
+    private readonly jobs: JobsService,
+    private readonly accounting: AccountingService
+) {}
+
+// method
+async createPayment(tenantId: string, invoiceId: string, amount: number, method: string) {
+    const inv = await this.prisma.invoice.findFirst({ where: { id: invoiceId, tenantId } });
+    if (!inv) throw new BadRequestException('Invoice not found');
+
+    const payment = await this.prisma.payment.create({
+        data: {
+            invoiceId,
+            amount: amount as any,
+            method
+        }
+    });
+
+    await this.accounting.postInvoicePaymentEntry(tenantId, invoiceId, payment.id, amount);
+
+    // Optional: mark paid if totals match
+    const paidSum = await this.prisma.payment.aggregate({
+        where: { invoiceId },
+        _sum: { amount: true }
+    });
+
+    const totalPaid = Number(paidSum._sum.amount ?? 0);
+    if (totalPaid >= Number(inv.total)) {
+        await this.prisma.invoice.update({
+            where: { id: invoiceId },
+            data: { status: 'PAID' }
+        });
+    }
+
+    return payment;
+}
 }

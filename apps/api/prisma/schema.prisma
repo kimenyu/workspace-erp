@@ -204,3 +204,55 @@ model Payment {
 
   invoice Invoice @relation(fields: [invoiceId], references: [id])
 }
+
+
+enum AccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  REVENUE
+  EXPENSE
+}
+
+model Account {
+  id        String   @id @default(uuid())
+  tenantId  String
+  code      String
+  name      String
+  type      AccountType
+  createdAt DateTime @default(now())
+
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  lines     JournalLine[]
+
+  @@unique([tenantId, code])
+}
+
+model JournalEntry {
+  id          String   @id @default(uuid())
+  tenantId    String
+  reference   String?  // e.g. invoiceId/paymentId
+  memo        String?
+  postedAt    DateTime @default(now())
+  createdAt   DateTime @default(now())
+
+  tenant      Tenant @relation(fields: [tenantId], references: [id])
+  lines       JournalLine[]
+}
+
+model JournalLine {
+  id            String @id @default(uuid())
+  tenantId      String
+  journalEntryId String
+  accountId     String
+
+  // store as Decimal for money
+  debit         Decimal @db.Numeric(12,2)
+  credit        Decimal @db.Numeric(12,2)
+
+  tenant        Tenant       @relation(fields: [tenantId], references: [id])
+  journalEntry  JournalEntry @relation(fields: [journalEntryId], references: [id])
+  account       Account      @relation(fields: [accountId], references: [id])
+
+  @@index([tenantId, accountId])
+}

@@ -5,9 +5,9 @@ import { TenancyService } from './tenancy.service';
 export class TenantGuard implements CanActivate {
   constructor(private readonly tenancy: TenancyService) {}
 
-  canActivate(context: ExecutionContext): boolean {
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     const req = context.switchToHttp().getRequest();
-    const tenantId = this.tenancy.getTenantIdFromHeaders(req.headers);
+    const tenantId = await this.tenancy.resolveTenantId(req.headers, req.headers.host);
     req.tenantId = tenantId;
     return true;
   }
