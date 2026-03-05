@@ -1,0 +1,11 @@
+{
+    "name": "@workspace-erp/shared",
+    "version": "0.0.1",
+    "private": true,
+    "scripts": {
+        "build": "tsc -p tsconfig.json",
+        "start": "node dist/main"
+    },
+    "dependencies": {},
+    "devDependencies": {}
+}
