@@ -13,17 +13,24 @@ model Tenant {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  googleDriveFolderId String?
-  inventorySheetId    String?
+  googleDriveFolderId     String?
+  inventorySheetId        String?
   inventoryLastExportedAt DateTime?
 
-  users          UserTenant[]
-  roles          Role[]
-  auditLogs      AuditLog[]
-  customers      Customer[]
-  products       Product[]
-  invoices       Invoice[]
-  stockMovements StockMovement[]
+  users               UserTenant[]
+  roles               Role[]
+  auditLogs           AuditLog[]
+  customers           Customer[]
+  products            Product[]
+  invoices            Invoice[]
+  stockMovements      StockMovement[]
+  accounts            Account[]
+  journalEntries      JournalEntry[]
+  journalLines        JournalLine[]
+  suppliers           Supplier[]
+  purchaseOrders      PurchaseOrder[]
+  inventoryCostLayers InventoryCostLayer[]
+  cogsEntries         CogsEntry[]
 }
 
 model User {
@@ -130,8 +137,11 @@ model Product {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  tenant         Tenant          @relation(fields: [tenantId], references: [id])
-  stockMovements StockMovement[]
+  tenant              Tenant               @relation(fields: [tenantId], references: [id])
+  stockMovements      StockMovement[]
+  purchaseOrderLines  PurchaseOrderLine[]
+  inventoryCostLayers InventoryCostLayer[]
+  cogsEntries         CogsEntry[]
 
   @@unique([tenantId, sku])
 }
@@ -165,14 +175,15 @@ model Invoice {
   createdAt  DateTime      @default(now())
   updatedAt  DateTime      @updatedAt
 
-  driveDocFileId String?
-  drivePdfFileId String?
+  driveDocFileId     String?
+  drivePdfFileId     String?
   invoiceEmailSentAt DateTime?
 
-  tenant   Tenant        @relation(fields: [tenantId], references: [id])
-  customer Customer      @relation(fields: [customerId], references: [id])
-  lines    InvoiceLine[]
-  payments Payment[]
+  tenant      Tenant        @relation(fields: [tenantId], references: [id])
+  customer    Customer      @relation(fields: [customerId], references: [id])
+  lines       InvoiceLine[]
+  payments    Payment[]
+  cogsEntries CogsEntry[]
 }
 
 model InvoiceLine {
@@ -205,7 +216,6 @@ model Payment {
   invoice Invoice @relation(fields: [invoiceId], references: [id])
 }
 
-
 enum AccountType {
   ASSET
   LIABILITY
@@ -215,48 +225,47 @@ enum AccountType {
 }
 
 model Account {
-  id        String   @id @default(uuid())
+  id        String      @id @default(uuid())
   tenantId  String
   code      String
   name      String
   type      AccountType
-  createdAt DateTime @default(now())
+  createdAt DateTime    @default(now())
 
-  tenant    Tenant   @relation(fields: [tenantId], references: [id])
-  lines     JournalLine[]
+  tenant Tenant        @relation(fields: [tenantId], references: [id])
+  lines  JournalLine[]
 
   @@unique([tenantId, code])
 }
 
 model JournalEntry {
-  id          String   @id @default(uuid())
-  tenantId    String
-  reference   String?  // e.g. invoiceId/paymentId
-  memo        String?
-  postedAt    DateTime @default(now())
-  createdAt   DateTime @default(now())
+  id        String   @id @default(uuid())
+  tenantId  String
+  reference String?
+  memo      String?
+  postedAt  DateTime @default(now())
+  createdAt DateTime @default(now())
 
-  tenant      Tenant @relation(fields: [tenantId], references: [id])
-  lines       JournalLine[]
+  tenant Tenant        @relation(fields: [tenantId], references: [id])
+  lines  JournalLine[]
 }
 
 model JournalLine {
-  id            String @id @default(uuid())
-  tenantId      String
+  id             String  @id @default(uuid())
+  tenantId       String
   journalEntryId String
-  accountId     String
+  accountId      String
+  debit          Decimal @db.Decimal(12, 2)
+  credit         Decimal @db.Decimal(12, 2)
 
-  // store as Decimal for money
-  debit         Decimal @db.Numeric(12,2)
-  credit        Decimal @db.Numeric(12,2)
-
-  tenant        Tenant       @relation(fields: [tenantId], references: [id])
-  journalEntry  JournalEntry @relation(fields: [journalEntryId], references: [id])
-  account       Account      @relation(fields: [accountId], references: [id])
+  tenant       Tenant       @relation(fields: [tenantId], references: [id])
+  journalEntry JournalEntry @relation(fields: [journalEntryId], references: [id])
+  account      Account      @relation(fields: [accountId], references: [id])
 
   @@index([tenantId, accountId])
 }
 
+/* ===== ERP: Purchasing ===== */
 model Supplier {
   id        String   @id @default(uuid())
   tenantId  String
@@ -266,35 +275,35 @@ model Supplier {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  tenant    Tenant @relation(fields: [tenantId], references: [id])
+  tenant         Tenant          @relation(fields: [tenantId], references: [id])
   purchaseOrders PurchaseOrder[]
 }
 
 model PurchaseOrder {
-  id         String   @id @default(uuid())
+  id         String              @id @default(uuid())
   tenantId   String
   supplierId String
   status     PurchaseOrderStatus @default(DRAFT)
-  total      Decimal  @db.Numeric(12,2)
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  total      Decimal             @db.Decimal(12, 2)
+  createdAt  DateTime            @default(now())
+  updatedAt  DateTime            @updatedAt
 
-  tenant     Tenant   @relation(fields: [tenantId], references: [id])
-  supplier   Supplier @relation(fields: [supplierId], references: [id])
-  lines      PurchaseOrderLine[]
+  tenant   Tenant              @relation(fields: [tenantId], references: [id])
+  supplier Supplier            @relation(fields: [supplierId], references: [id])
+  lines    PurchaseOrderLine[]
 }
 
 model PurchaseOrderLine {
-  id            String   @id @default(uuid())
+  id              String  @id @default(uuid())
   purchaseOrderId String
-  productId      String
-  name           String
-  qty            Int
-  unitCost       Decimal  @db.Numeric(12,2)
-  lineTotal      Decimal  @db.Numeric(12,2)
+  productId       String
+  name            String
+  qty             Int
+  unitCost        Decimal @db.Decimal(12, 2)
+  lineTotal       Decimal @db.Decimal(12, 2)
 
-  purchaseOrder  PurchaseOrder @relation(fields: [purchaseOrderId], references: [id])
-  product        Product       @relation(fields: [productId], references: [id])
+  purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id])
+  product       Product       @relation(fields: [productId], references: [id])
 }
 
 enum PurchaseOrderStatus {
@@ -305,34 +314,33 @@ enum PurchaseOrderStatus {
 }
 
 model InventoryCostLayer {
-  id        String   @id @default(uuid())
-  tenantId  String
-  productId String
-  // remaining quantity in this layer
+  id           String   @id @default(uuid())
+  tenantId     String
+  productId    String
   remainingQty Int
-  unitCost  Decimal  @db.Numeric(12,2)
-  source    String? // e.g. PO_RECEIPT:<poId>
-  createdAt DateTime @default(now())
+  unitCost     Decimal  @db.Decimal(12, 2)
+  source       String?
+  createdAt    DateTime @default(now())
 
-  tenant    Tenant  @relation(fields: [tenantId], references: [id])
-  product   Product @relation(fields: [productId], references: [id])
+  tenant  Tenant  @relation(fields: [tenantId], references: [id])
+  product Product @relation(fields: [productId], references: [id])
 
   @@index([tenantId, productId, createdAt])
 }
 
 model CogsEntry {
-  id         String   @id @default(uuid())
-  tenantId   String
-  invoiceId  String
-  productId  String
-  qty        Int
-  unitCost   Decimal  @db.Numeric(12,2)
-  totalCost  Decimal  @db.Numeric(12,2)
-  createdAt  DateTime @default(now())
+  id        String   @id @default(uuid())
+  tenantId  String
+  invoiceId String
+  productId String
+  qty       Int
+  unitCost  Decimal  @db.Decimal(12, 2)
+  totalCost Decimal  @db.Decimal(12, 2)
+  createdAt DateTime @default(now())
 
-  tenant     Tenant  @relation(fields: [tenantId], references: [id])
-  invoice    Invoice @relation(fields: [invoiceId], references: [id])
-  product    Product @relation(fields: [productId], references: [id])
+  tenant  Tenant  @relation(fields: [tenantId], references: [id])
+  invoice Invoice @relation(fields: [invoiceId], references: [id])
+  product Product @relation(fields: [productId], references: [id])
 
   @@index([tenantId, invoiceId])
 }

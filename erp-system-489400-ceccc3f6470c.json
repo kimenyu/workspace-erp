@@ -1,0 +1,13 @@
+{
+  "type": "service_account",
+  "project_id": "erp-system-489400",
+  "private_key_id": "ceccc3f6470c851e003b0cd66db2a72f872f762b",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEugIBADANBgkqhkiG9w0BAQEFAASCBKQwggSgAgEAAoIBAQCj2qElZUKh7h5A\n20RVTj/PJ0sm/uVaMGYihMuXZ2L0Ir/5zdPyzTy2pZjpQnVwLWmBaeL5ckbx1kWQ\nr/S8PbTwigOPBkfGKZFhiGuO38PQ4DrI+z5/Nln2QkC6pIoTCW2pe/JlO1J2u4O1\nBq0XZ76J9hooEmFvZfRJl4DoyP4kTZdW8YT4IbqgwfQnq1Qwj6LDqkwqmb04ew2U\nMOxgo2UL0mFnqZpIZ+ekvuig9jiKnC2xbR0/Mo6PmwU9C7tEJx9Oc5o4Sl/MoEbh\n4fKoZVMrJchI4MlTwZAAQnkrBWwFBL6YDqTSADG48nm86nwigmo1BDv8um7+G1KM\nGk/lHppdAgMBAAECggEAAVqFNq2sEj7JIzIGHrCwMduz127UCDdNvX7ci7PZizjD\n3m8HD2kHCMWio/KqzUvV8X3yPd5/m/A9A0f6cDLcs5jNFLmX9P9TT+7BLLbIHSNt\nEn7FpZljJUSnPwnfvIgfm5g5iJqOQNeluLFSBr2sD+NN+s/3Qn6HuRmDG0+Y9RKa\n1XOoJx0PQzA0TOD0Y4U5vRNTEa04dHo8QwMLAVbfv4VymW1K619ArBzTkrNDm3WU\nRUaLSeKFMFqYCZXwO2AtQ+5QD4Z3XJfrPEcuKDFrTS0oC4EpJax78pXdXKimCGp3\nIhwLDoFmVIvyH0sv5QEjaYjufZ7O6gWn5TbMjxFIIQKBgQDVXflNuTJ47LCzh7uM\nL8tWOtOZmvabJ1XlN+Gstmr3hlU8qC1HIMtgSWaYQ25sbMrMQJa3Hp9ejQaVROxP\nRcyVy6vV2MAQZG26ZqKSl3MWAVNOBaiLYTNdK+qYxQ/h+0UTbBHd2oR5TsXnVaA0\nbGUVsD3MP/LqXQsivvu468rnxQKBgQDEl/4r6Vfcriwpsxu5Z146/cqeas6q3OZk\nY9NauF5PEn6BS+DIfCt/PYJDKQbZG9add3NOkNMtI08fN2a4EXPcxpjdUlXIbYzB\nKH3ehLX0ECqbPRHqtbt8wAFGkdWgO0G514xBXTaq6qiFJSJgllLZQoIlJQr6KjQR\nURgTxj15uQKBgDP15rie2UPJoF6YN3w0R3iAaveFXXj7Y1em/DZrVjFhbXCQJDam\nLeEM/wclpMaS1/BV6l49/uGvxmKjnkjP3rq8FuTFHEDhtDcot36rk0NQn1Do39rR\nmQifoUoC85M89d18+/zjMk+4d0mW+KTLoPJfMS2EhUu9zPBxQiwOgCNhAn8G6VEG\nOi3clEL5NFLFMd0eNc3pw9eAKkPvQ5MqnVCzdvL7mK9OXQ8qaf8qXUbgWxowbwKe\nwHisHZGqh0gVMIfiOxkkrsBVS4SnRcUnDYNYETluO7dliP4OZLGmyXm5KFwnLGzB\n34UMfTNvet66ho5jFPN+Ws8H/HPYKAGwsEd5AoGAeEp/w3MCv0maiisp8t+4GN2c\n6yA5k4BfEpFnP/9G75LPqA6JIfeSNflnHHpSKST/hU0O9UcQQ0la9HXU3mzdqCfa\nshDki9ZZ89jAY949rHDpK7DOwccIRaRPzw7/gZ1vO56uxq6mBttK208G2f29nJ9j\nfLRtHQFI8DiU0tCqQx8=\n-----END PRIVATE KEY-----\n",
+  "client_email": "erp-worker@erp-system-489400.iam.gserviceaccount.com",
+  "client_id": "114993413298757760031",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/erp-worker%40erp-system-489400.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}

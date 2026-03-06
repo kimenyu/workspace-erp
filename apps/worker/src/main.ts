@@ -1,9 +1,11 @@
-import 'dotenv/config';
+import './env';
 import { Worker } from 'bullmq';
 import { createRedisConnection } from './redis.connection';
 import { GOOGLE_JOBS, JOB_QUEUES } from './jobs.types';
 import { prisma } from './db/prisma';
 import { GoogleErpWorker } from './google.erp.worker';
+import dotenv from 'dotenv';
+import path from 'path';
 
 const connection = createRedisConnection();
 

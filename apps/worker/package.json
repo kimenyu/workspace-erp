@@ -10,7 +10,7 @@
     "dependencies": {
         "@prisma/client": "^7.4.2",
         "bullmq": "^5.70.2",
-        "googleapis": "^171.4.0",
+        "dotenv": "^17.3.1",
         "ioredis": "^5.10.0",
         "prisma": "^7.4.2"
     },
