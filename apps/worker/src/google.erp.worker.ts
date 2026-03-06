@@ -4,8 +4,10 @@ import { google } from 'googleapis';
 import { prisma } from './db/prisma';
 import { createGoogleAuth } from './google.auth';
 
-// Only need Sheets scope — no Drive/Docs needed for invoice flow anymore
-const SHEETS_SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
+// No Drive scope needed — we write to a pre-existing sheet shared with the service account
+const SCOPES = [
+    'https://www.googleapis.com/auth/spreadsheets',
+];
 
 function buildMailTransport() {
     const user = process.env.GMAIL_USER;
@@ -30,7 +32,6 @@ function generateInvoicePdf(invoice: {
         doc.on('end', () => resolve(Buffer.concat(chunks)));
         doc.on('error', reject);
 
-        // Header
         doc.fontSize(20).font('Helvetica-Bold').text('INVOICE', { align: 'right' });
         doc.moveDown(0.5);
         doc.fontSize(10).font('Helvetica');
@@ -39,14 +40,12 @@ function generateInvoicePdf(invoice: {
         doc.text(`Status: ${invoice.status}`, { align: 'right' });
         doc.moveDown();
 
-        // Customer
         doc.fontSize(12).font('Helvetica-Bold').text('Bill To:');
         doc.fontSize(10).font('Helvetica');
         doc.text(invoice.customer.name);
         if (invoice.customer.email) doc.text(invoice.customer.email);
         doc.moveDown();
 
-        // Line items table header
         doc.fontSize(11).font('Helvetica-Bold');
         const headerY = doc.y;
         doc.text('Item', 50, headerY, { width: 200 });
@@ -55,11 +54,9 @@ function generateInvoicePdf(invoice: {
         doc.text('Total', 430, headerY, { width: 90, align: 'right' });
         doc.moveDown(0.3);
 
-        // Divider
         doc.moveTo(50, doc.y).lineTo(550, doc.y).stroke();
         doc.moveDown(0.3);
 
-        // Line items
         doc.fontSize(10).font('Helvetica');
         for (const line of invoice.lines) {
             const rowY = doc.y;
@@ -70,7 +67,6 @@ function generateInvoicePdf(invoice: {
             doc.moveDown(0.5);
         }
 
-        // Divider + Total
         doc.moveDown(0.3);
         doc.moveTo(50, doc.y).lineTo(550, doc.y).stroke();
         doc.moveDown(0.5);
@@ -82,6 +78,9 @@ function generateInvoicePdf(invoice: {
 }
 
 export class GoogleErpWorker {
+    private auth = createGoogleAuth(SCOPES);
+    private sheets = google.sheets({ version: 'v4', auth: this.auth });
+
     async sendInvoiceEmail(tenantId: string, invoiceId: string) {
         const invoice = await prisma.invoice.findFirst({
             where: { id: invoiceId, tenantId },
@@ -90,7 +89,6 @@ export class GoogleErpWorker {
         if (!invoice) throw new Error('Invoice not found');
         if (!invoice.customer.email) throw new Error('Customer email missing');
 
-        // Idempotency: skip if already sent
         if (invoice.invoiceEmailSentAt) {
             return { ok: true, skipped: true, reason: 'already_sent', to: invoice.customer.email };
         }
@@ -130,18 +128,45 @@ export class GoogleErpWorker {
         const tenant = await prisma.tenant.findUnique({ where: { id: tenantId } });
         if (!tenant) throw new Error('Tenant not found');
 
-        // Skip if exported within last 2 minutes
+        // Skip if exported within last 2 minutes (retry guard)
         const last = tenant.inventoryLastExportedAt?.getTime() ?? 0;
         if (last && Date.now() - last < 2 * 60 * 1000) {
-            return { skipped: true, reason: 'recently_exported', spreadsheetId: tenant.inventorySheetId ?? null };
+            const spreadsheetId = tenant.inventorySheetId ?? process.env.GOOGLE_INVENTORY_SHEET_ID;
+            return {
+                skipped: true,
+                reason: 'recently_exported',
+                spreadsheetId,
+                sheetUrl: spreadsheetId
+                    ? `https://docs.google.com/spreadsheets/d/${spreadsheetId}`
+                    : null,
+            };
         }
 
-        const auth = createGoogleAuth(SHEETS_SCOPES);
-        const sheets = google.sheets({ version: 'v4', auth });
+        // Use sheet from DB (persisted after first export) or fall back to env var
+        const spreadsheetId = tenant.inventorySheetId ?? process.env.GOOGLE_INVENTORY_SHEET_ID;
+        if (!spreadsheetId) {
+            throw new Error(
+                'No inventory sheet configured. ' +
+                'Create a Google Sheet, share it with the service account, ' +
+                'and set GOOGLE_INVENTORY_SHEET_ID in .env'
+            );
+        }
 
-        const products = await prisma.product.findMany({ where: { tenantId }, orderBy: { sku: 'asc' } });
+        // Persist sheet ID to tenant if not already saved
+        if (!tenant.inventorySheetId) {
+            await prisma.tenant.update({
+                where: { id: tenantId },
+                data: { inventorySheetId: spreadsheetId },
+            });
+        }
+
+        const products = await prisma.product.findMany({
+            where: { tenantId },
+            orderBy: { sku: 'asc' },
+        });
         const moves = await prisma.stockMovement.findMany({ where: { tenantId } });
 
+        // Compute current stock per product
         const stockMap = new Map<string, number>();
         for (const p of products) stockMap.set(p.id, 0);
         for (const m of moves) {
@@ -151,30 +176,85 @@ export class GoogleErpWorker {
             if (m.type === 'ADJUST') stockMap.set(m.productId, m.quantity);
         }
 
-        let spreadsheetId = tenant.inventorySheetId ?? null;
-        if (!spreadsheetId) {
-            const created = await sheets.spreadsheets.create({
-                requestBody: { properties: { title: `Inventory Report - ${tenant.name}` } },
-            });
-            spreadsheetId = created.data.spreadsheetId!;
-            await prisma.tenant.update({ where: { id: tenantId }, data: { inventorySheetId: spreadsheetId } });
-        }
+        // Build data rows
+        const exportedAt = new Date().toISOString().replace('T', ' ').slice(0, 19);
+        const dataRows = products.map((p) => {
+            const stock = stockMap.get(p.id) ?? 0;
+            const price = Number(p.price);
+            return [p.sku, p.name, price, stock, Number((price * stock).toFixed(2))];
+        });
 
         const values = [
-            ['SKU', 'Name', 'Price', 'Stock'],
-            ...products.map((p) => [
-                p.sku,
-                p.name,
-                Number(p.price).toFixed(2),
-                String(stockMap.get(p.id) ?? 0),
-            ]),
+            [`Inventory Report — ${tenant.name}`, '', '', '', `Exported: ${exportedAt}`],
+            [],
+            ['SKU', 'Product Name', 'Price', 'Stock on Hand', 'Stock Value'],
+            ...dataRows,
+            [],
+            ['', '', '', 'TOTAL VALUE', `=SUM(E4:E${products.length + 3})`],
         ];
 
-        await sheets.spreadsheets.values.update({
+        // Clear the sheet first then write fresh data
+        await this.sheets.spreadsheets.values.clear({
             spreadsheetId,
-            range: 'A1:D10000',
-            valueInputOption: 'RAW',
+            range: 'A1:Z10000',
+        });
+
+        await this.sheets.spreadsheets.values.update({
+            spreadsheetId,
+            range: 'A1',
+            valueInputOption: 'USER_ENTERED',
             requestBody: { values },
+        });
+
+        // Apply formatting
+        await this.sheets.spreadsheets.batchUpdate({
+            spreadsheetId,
+            requestBody: {
+                requests: [
+                    // Bold title row
+                    {
+                        repeatCell: {
+                            range: { sheetId: 0, startRowIndex: 0, endRowIndex: 1 },
+                            cell: { userEnteredFormat: { textFormat: { bold: true, fontSize: 12 } } },
+                            fields: 'userEnteredFormat.textFormat',
+                        },
+                    },
+                    // Blue header row with white bold text
+                    {
+                        repeatCell: {
+                            range: { sheetId: 0, startRowIndex: 2, endRowIndex: 3 },
+                            cell: {
+                                userEnteredFormat: {
+                                    textFormat: {
+                                        bold: true,
+                                        foregroundColor: { red: 1, green: 1, blue: 1 },
+                                    },
+                                    backgroundColor: { red: 0.18, green: 0.46, blue: 0.71 },
+                                },
+                            },
+                            fields: 'userEnteredFormat(textFormat,backgroundColor)',
+                        },
+                    },
+                    // Freeze first 3 rows
+                    {
+                        updateSheetProperties: {
+                            properties: { sheetId: 0, gridProperties: { frozenRowCount: 3 } },
+                            fields: 'gridProperties.frozenRowCount',
+                        },
+                    },
+                    // Auto-resize columns A–E
+                    {
+                        autoResizeDimensions: {
+                            dimensions: {
+                                sheetId: 0,
+                                dimension: 'COLUMNS',
+                                startIndex: 0,
+                                endIndex: 5,
+                            },
+                        },
+                    },
+                ],
+            },
         });
 
         await prisma.tenant.update({
@@ -182,175 +262,110 @@ export class GoogleErpWorker {
             data: { inventoryLastExportedAt: new Date() },
         });
 
-        return { spreadsheetId };
+        const sheetUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}`;
+        console.log(`✅ Inventory exported to: ${sheetUrl}`);
+
+        return { spreadsheetId, sheetUrl };
     }
 }
 
-// import { google } from 'googleapis';
+// import PDFDocument from 'pdfkit';
 // import nodemailer from 'nodemailer';
+// import { google } from 'googleapis';
 // import { prisma } from './db/prisma';
 // import { createGoogleAuth } from './google.auth';
 //
-// // No gmail.send scope needed anymore — nodemailer handles email
 // const SCOPES = [
-//     'https://www.googleapis.com/auth/drive',
-//     'https://www.googleapis.com/auth/documents',
 //     'https://www.googleapis.com/auth/spreadsheets',
+//     'https://www.googleapis.com/auth/drive', // needed to share the sheet
 // ];
 //
 // function buildMailTransport() {
 //     const user = process.env.GMAIL_USER;
 //     const pass = process.env.GMAIL_APP_PASSWORD;
+//     if (!user || !pass) throw new Error('Missing GMAIL_USER or GMAIL_APP_PASSWORD in .env');
+//     return nodemailer.createTransport({ service: 'gmail', auth: { user, pass } });
+// }
 //
-//     if (!user || !pass) {
-//         throw new Error('Missing GMAIL_USER or GMAIL_APP_PASSWORD in .env');
-//     }
+// function generateInvoicePdf(invoice: {
+//     id: string;
+//     createdAt: Date;
+//     total: any;
+//     status: string;
+//     customer: { name: string; email?: string | null };
+//     lines: { name: string; qty: number; unitPrice: any; lineTotal: any }[];
+// }): Promise<Buffer> {
+//     return new Promise((resolve, reject) => {
+//         const doc = new PDFDocument({ margin: 50 });
+//         const chunks: Buffer[] = [];
 //
-//     return nodemailer.createTransport({
-//         service: 'gmail',
-//         auth: { user, pass },
+//         doc.on('data', (chunk) => chunks.push(chunk));
+//         doc.on('end', () => resolve(Buffer.concat(chunks)));
+//         doc.on('error', reject);
+//
+//         doc.fontSize(20).font('Helvetica-Bold').text('INVOICE', { align: 'right' });
+//         doc.moveDown(0.5);
+//         doc.fontSize(10).font('Helvetica');
+//         doc.text(`Invoice ID: ${invoice.id}`, { align: 'right' });
+//         doc.text(`Date: ${new Date(invoice.createdAt).toISOString().slice(0, 10)}`, { align: 'right' });
+//         doc.text(`Status: ${invoice.status}`, { align: 'right' });
+//         doc.moveDown();
+//
+//         doc.fontSize(12).font('Helvetica-Bold').text('Bill To:');
+//         doc.fontSize(10).font('Helvetica');
+//         doc.text(invoice.customer.name);
+//         if (invoice.customer.email) doc.text(invoice.customer.email);
+//         doc.moveDown();
+//
+//         doc.fontSize(11).font('Helvetica-Bold');
+//         const headerY = doc.y;
+//         doc.text('Item', 50, headerY, { width: 200 });
+//         doc.text('Qty', 260, headerY, { width: 60 });
+//         doc.text('Unit Price', 330, headerY, { width: 90 });
+//         doc.text('Total', 430, headerY, { width: 90, align: 'right' });
+//         doc.moveDown(0.3);
+//
+//         doc.moveTo(50, doc.y).lineTo(550, doc.y).stroke();
+//         doc.moveDown(0.3);
+//
+//         doc.fontSize(10).font('Helvetica');
+//         for (const line of invoice.lines) {
+//             const rowY = doc.y;
+//             doc.text(line.name, 50, rowY, { width: 200 });
+//             doc.text(String(line.qty), 260, rowY, { width: 60 });
+//             doc.text(Number(line.unitPrice).toFixed(2), 330, rowY, { width: 90 });
+//             doc.text(Number(line.lineTotal).toFixed(2), 430, rowY, { width: 90, align: 'right' });
+//             doc.moveDown(0.5);
+//         }
+//
+//         doc.moveDown(0.3);
+//         doc.moveTo(50, doc.y).lineTo(550, doc.y).stroke();
+//         doc.moveDown(0.5);
+//         doc.fontSize(12).font('Helvetica-Bold');
+//         doc.text(`Total: ${Number(invoice.total).toFixed(2)}`, { align: 'right' });
+//
+//         doc.end();
 //     });
 // }
 //
 // export class GoogleErpWorker {
 //     private auth = createGoogleAuth(SCOPES);
-//
 //     private drive = google.drive({ version: 'v3', auth: this.auth });
-//     private docs = google.docs({ version: 'v1', auth: this.auth });
 //     private sheets = google.sheets({ version: 'v4', auth: this.auth });
-//
-//     async ensureTenantDriveFolder(tenantId: string) {
-//         const tenant = await prisma.tenant.findUnique({ where: { id: tenantId } });
-//         if (!tenant) throw new Error('Tenant not found');
-//
-//         if (tenant.googleDriveFolderId) return tenant.googleDriveFolderId;
-//
-//         const root = process.env.GOOGLE_DRIVE_ROOT_FOLDER_ID;
-//
-//         const res = await this.drive.files.create({
-//             requestBody: {
-//                 name: `ERP - ${tenant.name}`,
-//                 mimeType: 'application/vnd.google-apps.folder',
-//                 parents: root ? [root] : undefined,
-//             },
-//             fields: 'id',
-//         });
-//
-//         const folderId = res.data.id!;
-//         await prisma.tenant.update({
-//             where: { id: tenantId },
-//             data: { googleDriveFolderId: folderId },
-//         });
-//
-//         return folderId;
-//     }
-//
-//     async downloadDriveFileBytes(fileId: string): Promise<Buffer> {
-//         const res = await this.drive.files.get(
-//             { fileId, alt: 'media' },
-//             { responseType: 'arraybuffer' }
-//         );
-//         return Buffer.from(res.data as ArrayBuffer);
-//     }
-//
-//     async generateInvoicePdfToDrive(tenantId: string, invoiceId: string) {
-//         const invoice = await prisma.invoice.findFirst({
-//             where: { id: invoiceId, tenantId },
-//             include: { customer: true, lines: true, tenant: true },
-//         });
-//         if (!invoice) throw new Error('Invoice not found');
-//
-//         // Reuse existing PDF if already generated
-//         if (invoice.drivePdfFileId) {
-//             return {
-//                 docId: invoice.driveDocFileId ?? null,
-//                 pdfId: invoice.drivePdfFileId,
-//                 link: '',
-//             };
-//         }
-//
-//         const templateId = process.env.GOOGLE_INVOICE_TEMPLATE_DOC_ID;
-//         if (!templateId) throw new Error('Missing GOOGLE_INVOICE_TEMPLATE_DOC_ID');
-//
-//         const folderId = await this.ensureTenantDriveFolder(tenantId);
-//
-//         // Copy template doc
-//         const copy = await this.drive.files.copy({
-//             fileId: templateId,
-//             requestBody: { name: `Invoice-${invoice.id}`, parents: [folderId] },
-//             fields: 'id',
-//         });
-//
-//         const docId = copy.data.id!;
-//         const linesText = invoice.lines
-//             .map(
-//                 (l) =>
-//                     `${l.name} | ${l.qty} x ${Number(l.unitPrice).toFixed(2)} = ${Number(l.lineTotal).toFixed(2)}`
-//             )
-//             .join('\n');
-//
-//         const replacements: Record<string, string> = {
-//             '{{INVOICE_ID}}': invoice.id,
-//             '{{CUSTOMER_NAME}}': invoice.customer.name,
-//             '{{CUSTOMER_EMAIL}}': invoice.customer.email ?? '',
-//             '{{STATUS}}': invoice.status,
-//             '{{TOTAL}}': Number(invoice.total).toFixed(2),
-//             '{{LINES}}': linesText,
-//             '{{DATE}}': new Date(invoice.createdAt).toISOString().slice(0, 10),
-//         };
-//
-//         const requests = Object.entries(replacements).map(([find, replaceText]) => ({
-//             replaceAllText: { containsText: { text: find, matchCase: true }, replaceText },
-//         }));
-//
-//         await this.docs.documents.batchUpdate({
-//             documentId: docId,
-//             requestBody: { requests },
-//         });
-//
-//         // Export to PDF
-//         const pdf = await this.drive.files.export(
-//             { fileId: docId, mimeType: 'application/pdf' },
-//             { responseType: 'arraybuffer' }
-//         );
-//         const pdfBuffer = Buffer.from(pdf.data as ArrayBuffer);
-//
-//         // Upload PDF to Drive
-//         const pdfUpload = await this.drive.files.create({
-//             requestBody: { name: `Invoice-${invoice.id}.pdf`, parents: [folderId] },
-//             media: { mimeType: 'application/pdf', body: pdfBuffer },
-//             fields: 'id, webViewLink',
-//         });
-//
-//         const pdfId = pdfUpload.data.id!;
-//         const link = pdfUpload.data.webViewLink ?? '';
-//
-//         await prisma.invoice.update({
-//             where: { id: invoiceId },
-//             data: { driveDocFileId: docId, drivePdfFileId: pdfId },
-//         });
-//
-//         return { docId, pdfId, link };
-//     }
 //
 //     async sendInvoiceEmail(tenantId: string, invoiceId: string) {
 //         const invoice = await prisma.invoice.findFirst({
 //             where: { id: invoiceId, tenantId },
-//             include: { customer: true },
+//             include: { customer: true, lines: true },
 //         });
 //         if (!invoice) throw new Error('Invoice not found');
 //         if (!invoice.customer.email) throw new Error('Customer email missing');
 //
-//         // Idempotency: skip if already sent
 //         if (invoice.invoiceEmailSentAt) {
 //             return { ok: true, skipped: true, reason: 'already_sent', to: invoice.customer.email };
 //         }
 //
-//         const artifact = await this.generateInvoicePdfToDrive(tenantId, invoiceId);
-//         if (!artifact.pdfId) throw new Error('Invoice PDF missing');
-//
-//         const pdfBytes = await this.downloadDriveFileBytes(artifact.pdfId);
-//
+//         const pdfBuffer = await generateInvoicePdf(invoice);
 //         const transporter = buildMailTransport();
 //
 //         await transporter.sendMail({
@@ -367,7 +382,7 @@ export class GoogleErpWorker {
 //             attachments: [
 //                 {
 //                     filename: `Invoice-${invoice.id}.pdf`,
-//                     content: pdfBytes,
+//                     content: pdfBuffer,
 //                     contentType: 'application/pdf',
 //                 },
 //             ],
@@ -381,29 +396,20 @@ export class GoogleErpWorker {
 //         return { ok: true, to: invoice.customer.email };
 //     }
 //
-//     async shareFileWithEmail(fileId: string, email: string) {
-//         await this.drive.permissions.create({
-//             fileId,
-//             requestBody: {
-//                 type: 'user',
-//                 role: 'reader',
-//                 emailAddress: email,
-//             },
-//             sendNotificationEmail: false,
-//         });
-//     }
-//
 //     async exportInventoryToSheet(tenantId: string) {
 //         const tenant = await prisma.tenant.findUnique({ where: { id: tenantId } });
 //         if (!tenant) throw new Error('Tenant not found');
 //
-//         // Skip if exported within last 2 minutes (job retry guard)
+//         // Skip if exported within last 2 minutes (retry guard)
 //         const last = tenant.inventoryLastExportedAt?.getTime() ?? 0;
 //         if (last && Date.now() - last < 2 * 60 * 1000) {
 //             return {
 //                 skipped: true,
 //                 reason: 'recently_exported',
 //                 spreadsheetId: tenant.inventorySheetId ?? null,
+//                 sheetUrl: tenant.inventorySheetId
+//                     ? `https://docs.google.com/spreadsheets/d/${tenant.inventorySheetId}`
+//                     : null,
 //             };
 //         }
 //
@@ -413,9 +419,9 @@ export class GoogleErpWorker {
 //         });
 //         const moves = await prisma.stockMovement.findMany({ where: { tenantId } });
 //
+//         // Compute current stock per product
 //         const stockMap = new Map<string, number>();
 //         for (const p of products) stockMap.set(p.id, 0);
-//
 //         for (const m of moves) {
 //             const cur = stockMap.get(m.productId) ?? 0;
 //             if (m.type === 'IN') stockMap.set(m.productId, cur + m.quantity);
@@ -423,10 +429,15 @@ export class GoogleErpWorker {
 //             if (m.type === 'ADJUST') stockMap.set(m.productId, m.quantity);
 //         }
 //
+//         const isNewSheet = !tenant.inventorySheetId;
 //         let spreadsheetId = tenant.inventorySheetId ?? null;
+//
+//         // Create spreadsheet if it doesn't exist yet
 //         if (!spreadsheetId) {
 //             const created = await this.sheets.spreadsheets.create({
-//                 requestBody: { properties: { title: `Inventory Report - ${tenant.name}` } },
+//                 requestBody: {
+//                     properties: { title: `Inventory Report - ${tenant.name}` },
+//                 },
 //             });
 //             spreadsheetId = created.data.spreadsheetId!;
 //             await prisma.tenant.update({
@@ -435,349 +446,94 @@ export class GoogleErpWorker {
 //             });
 //         }
 //
+//         // Write headers + data rows
+//         const exportedAt = new Date().toISOString().replace('T', ' ').slice(0, 19);
+//         const dataRows = products.map((p) => {
+//             const stock = stockMap.get(p.id) ?? 0;
+//             const price = Number(p.price);
+//             return [p.sku, p.name, price, stock, Number((price * stock).toFixed(2))];
+//         });
+//
 //         const values = [
-//             ['SKU', 'Name', 'Price', 'Stock'],
-//             ...products.map((p) => [
-//                 p.sku,
-//                 p.name,
-//                 Number(p.price).toFixed(2),
-//                 String(stockMap.get(p.id) ?? 0),
-//             ]),
+//             [`Inventory Report — ${tenant.name}`, '', '', '', `Exported: ${exportedAt}`],
+//             [],
+//             ['SKU', 'Product Name', 'Price', 'Stock on Hand', 'Stock Value'],
+//             ...dataRows,
+//             [],
+//             ['', '', '', 'TOTAL VALUE', `=SUM(E4:E${products.length + 3})`],
 //         ];
 //
 //         await this.sheets.spreadsheets.values.update({
 //             spreadsheetId,
-//             range: 'A1:D10000',
-//             valueInputOption: 'RAW',
+//             range: 'A1',
+//             valueInputOption: 'USER_ENTERED', // allows =SUM formula to evaluate
 //             requestBody: { values },
 //         });
+//
+//         // Apply formatting
+//         await this.sheets.spreadsheets.batchUpdate({
+//             spreadsheetId,
+//             requestBody: {
+//                 requests: [
+//                     // Bold + larger title row
+//                     {
+//                         repeatCell: {
+//                             range: { sheetId: 0, startRowIndex: 0, endRowIndex: 1 },
+//                             cell: { userEnteredFormat: { textFormat: { bold: true, fontSize: 12 } } },
+//                             fields: 'userEnteredFormat.textFormat',
+//                         },
+//                     },
+//                     // Blue header row with white text
+//                     {
+//                         repeatCell: {
+//                             range: { sheetId: 0, startRowIndex: 2, endRowIndex: 3 },
+//                             cell: {
+//                                 userEnteredFormat: {
+//                                     textFormat: { bold: true, foregroundColor: { red: 1, green: 1, blue: 1 } },
+//                                     backgroundColor: { red: 0.18, green: 0.46, blue: 0.71 },
+//                                 },
+//                             },
+//                             fields: 'userEnteredFormat(textFormat,backgroundColor)',
+//                         },
+//                     },
+//                     // Freeze first 3 rows
+//                     {
+//                         updateSheetProperties: {
+//                             properties: { sheetId: 0, gridProperties: { frozenRowCount: 3 } },
+//                             fields: 'gridProperties.frozenRowCount',
+//                         },
+//                     },
+//                     // Auto-resize columns A-E
+//                     {
+//                         autoResizeDimensions: {
+//                             dimensions: { sheetId: 0, dimension: 'COLUMNS', startIndex: 0, endIndex: 5 },
+//                         },
+//                     },
+//                 ],
+//             },
+//         });
+//
+//         // On first creation: share with GMAIL_USER so it appears in their Google Drive
+//         if (isNewSheet && process.env.GMAIL_USER) {
+//             await this.drive.permissions.create({
+//                 fileId: spreadsheetId,
+//                 requestBody: {
+//                     type: 'user',
+//                     role: 'writer',
+//                     emailAddress: process.env.GMAIL_USER,
+//                 },
+//                 sendNotificationEmail: true, // user receives "shared with you" email
+//             });
+//         }
 //
 //         await prisma.tenant.update({
 //             where: { id: tenantId },
 //             data: { inventoryLastExportedAt: new Date() },
 //         });
 //
-//         return { spreadsheetId };
-//     }
-// }
-
-
-// import { google } from 'googleapis';
-// import { prisma } from './db/prisma';
-// import { createGoogleAuth } from './google.auth';
+//         const sheetUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}`;
+//         console.log(`Inventory sheet: ${sheetUrl}`);
 //
-// const SCOPES = [
-//     'https://www.googleapis.com/auth/drive',
-//     'https://www.googleapis.com/auth/documents',
-//     'https://www.googleapis.com/auth/spreadsheets',
-//     'https://www.googleapis.com/auth/gmail.send'
-// ];
-//
-// function encodeMessageToBase64Url(str: string) {
-//     return Buffer.from(str, 'utf-8')
-//         .toString('base64')
-//         .replace(/\+/g, '-')
-//         .replace(/\//g, '_')
-//         .replace(/=+$/, '');
-// }
-//
-// function base64UrlEncode(buf: Buffer) {
-//     return buf
-//         .toString('base64')
-//         .replace(/\+/g, '-')
-//         .replace(/\//g, '_')
-//         .replace(/=+$/, '');
-// }
-//
-// function buildMimeWithPdfAttachment(args: {
-//     to: string;
-//     subject: string;
-//     text: string;
-//     filename: string;
-//     pdfBytes: Buffer;
-// }) {
-//     const boundary = `----=_Part_${Date.now()}_${Math.random().toString(16).slice(2)}`;
-//
-//     const headers = [
-//         `To: ${args.to}`,
-//         `Subject: ${args.subject}`,
-//         `MIME-Version: 1.0`,
-//         `Content-Type: multipart/mixed; boundary="${boundary}"`
-//     ].join('\r\n');
-//
-//     const textPart = [
-//         `--${boundary}`,
-//         `Content-Type: text/plain; charset="UTF-8"`,
-//         `Content-Transfer-Encoding: 7bit`,
-//         ``,
-//         args.text
-//     ].join('\r\n');
-//
-//     // Gmail accepts base64url raw; inside MIME, attachment usually base64 (not base64url)
-//     const attachmentBase64 = args.pdfBytes.toString('base64');
-//
-//     const attachmentPart = [
-//         `--${boundary}`,
-//         `Content-Type: application/pdf; name="${args.filename}"`,
-//         `Content-Disposition: attachment; filename="${args.filename}"`,
-//         `Content-Transfer-Encoding: base64`,
-//         ``,
-//         attachmentBase64
-//     ].join('\r\n');
-//
-//     const end = `--${boundary}--`;
-//
-//     const mime = [headers, '', textPart, '', attachmentPart, '', end, ''].join('\r\n');
-//     return mime;
-// }
-//
-//
-// export class GoogleErpWorker {
-//     private auth = createGoogleAuth(SCOPES);
-//
-//     private drive = google.drive({ version: 'v3', auth: this.auth });
-//     private docs = google.docs({ version: 'v1', auth: this.auth });
-//     private gmail = google.gmail({ version: 'v1', auth: this.auth });
-//     private sheets = google.sheets({ version: 'v4', auth: this.auth });
-//
-//     async ensureTenantDriveFolder(tenantId: string) {
-//         const tenant = await prisma.tenant.findUnique({ where: { id: tenantId } });
-//         if (!tenant) throw new Error('Tenant not found');
-//
-//         if (tenant.googleDriveFolderId) return tenant.googleDriveFolderId;
-//
-//         const root = process.env.GOOGLE_DRIVE_ROOT_FOLDER_ID;
-//
-//         const res = await this.drive.files.create({
-//             requestBody: {
-//                 name: `ERP - ${tenant.name}`,
-//                 mimeType: 'application/vnd.google-apps.folder',
-//                 parents: root ? [root] : undefined
-//             },
-//             fields: 'id'
-//         });
-//
-//         const folderId = res.data.id!;
-//         await prisma.tenant.update({
-//             where: { id: tenantId },
-//             data: { googleDriveFolderId: folderId }
-//         });
-//
-//         return folderId;
-//     }
-//
-//     async downloadDriveFileBytes(fileId: string): Promise<Buffer> {
-//         const res = await this.drive.files.get(
-//             { fileId, alt: 'media' },
-//             { responseType: 'arraybuffer' }
-//         );
-//         return Buffer.from(res.data as ArrayBuffer);
-//     }
-//
-//
-//     async generateInvoicePdfToDrive(tenantId: string, invoiceId: string) {
-//         const invoice = await prisma.invoice.findFirst({
-//             where: { id: invoiceId, tenantId },
-//             include: { customer: true, lines: true, tenant: true }
-//         });
-//         if (!invoice) throw new Error('Invoice not found');
-//
-//         // if PDF already exists, reuse it
-//         if (invoice.drivePdfFileId) {
-//             return { docId: invoice.driveDocFileId ?? null, pdfId: invoice.drivePdfFileId, link: '' };
-//         }
-//
-//         const templateId = process.env.GOOGLE_INVOICE_TEMPLATE_DOC_ID;
-//         if (!templateId) throw new Error('Missing GOOGLE_INVOICE_TEMPLATE_DOC_ID');
-//
-//         const folderId = await this.ensureTenantDriveFolder(tenantId);
-//
-//         // Copy template doc
-//         const copy = await this.drive.files.copy({
-//             fileId: templateId,
-//             requestBody: { name: `Invoice-${invoice.id}`, parents: [folderId] },
-//             fields: 'id'
-//         });
-//
-//         const docId = copy.data.id!;
-//         const linesText = invoice.lines
-//             .map((l) => `${l.name} | ${l.qty} x ${Number(l.unitPrice).toFixed(2)} = ${Number(l.lineTotal).toFixed(2)}`)
-//             .join('\n');
-//
-//         const replacements: Record<string, string> = {
-//             '{{INVOICE_ID}}': invoice.id,
-//             '{{CUSTOMER_NAME}}': invoice.customer.name,
-//             '{{CUSTOMER_EMAIL}}': invoice.customer.email ?? '',
-//             '{{STATUS}}': invoice.status,
-//             '{{TOTAL}}': Number(invoice.total).toFixed(2),
-//             '{{LINES}}': linesText,
-//             '{{DATE}}': new Date(invoice.createdAt).toISOString().slice(0, 10)
-//         };
-//
-//         const requests = Object.entries(replacements).map(([find, replaceText]) => ({
-//             replaceAllText: { containsText: { text: find, matchCase: true }, replaceText }
-//         }));
-//
-//         await this.docs.documents.batchUpdate({
-//             documentId: docId,
-//             requestBody: { requests }
-//         });
-//
-//         // Export to PDF
-//         const pdf = await this.drive.files.export(
-//             { fileId: docId, mimeType: 'application/pdf' },
-//             { responseType: 'arraybuffer' }
-//         );
-//         const pdfBuffer = Buffer.from(pdf.data as ArrayBuffer);
-//
-//         // Upload PDF
-//         const pdfUpload = await this.drive.files.create({
-//             requestBody: { name: `Invoice-${invoice.id}.pdf`, parents: [folderId] },
-//             media: { mimeType: 'application/pdf', body: pdfBuffer },
-//             fields: 'id, webViewLink'
-//         });
-//
-//         const pdfId = pdfUpload.data.id!;
-//         const link = pdfUpload.data.webViewLink ?? '';
-//
-//         await prisma.invoice.update({
-//             where: { id: invoiceId },
-//             data: { driveDocFileId: docId, drivePdfFileId: pdfId }
-//         });
-//
-//         return { docId, pdfId, link };
-//     }
-//
-//     async sendInvoiceEmail(tenantId: string, invoiceId: string) {
-//         const invoice = await prisma.invoice.findFirst({
-//             where: { id: invoiceId, tenantId },
-//             include: { customer: true }
-//         });
-//         if (!invoice) throw new Error('Invoice not found');
-//         if (!invoice.customer.email) throw new Error('Customer email missing');
-//
-//         // if already emailed, do not re-send
-//         if (invoice.invoiceEmailSentAt) {
-//             return { ok: true, skipped: true, reason: 'already_sent', to: invoice.customer.email };
-//         }
-//
-//         const artifact = await this.generateInvoicePdfToDrive(tenantId, invoiceId);
-//
-//         // Optional: share the Drive PDF to the customer
-//         // Turn on via env if you want it:
-//         // SHARE_INVOICE_PDF_WITH_CUSTOMER=true
-//         const share = (process.env.SHARE_INVOICE_PDF_WITH_CUSTOMER ?? 'false').toLowerCase() === 'true';
-//         if (share && artifact.pdfId) {
-//             await this.shareFileWithEmail(artifact.pdfId, invoice.customer.email).catch(() => undefined);
-//         }
-//
-//         const to = invoice.customer.email;
-//         const subject = `Invoice ${invoice.id}`;
-//
-//         const text = [
-//             `Hello ${invoice.customer.name},`,
-//             ``,
-//             `Please find your invoice attached as a PDF.`,
-//             ``,
-//             `Thank you.`
-//         ].join('\n');
-//
-//         const pdfId = artifact.pdfId;
-//         if (!pdfId) throw new Error('Invoice PDF missing');
-//
-//         const pdfBytes = await this.downloadDriveFileBytes(pdfId);
-//
-//         const mime = buildMimeWithPdfAttachment({
-//             to,
-//             subject,
-//             text,
-//             filename: `Invoice-${invoice.id}.pdf`,
-//             pdfBytes
-//         });
-//
-//         await this.gmail.users.messages.send({
-//             userId: 'me',
-//             requestBody: { raw: base64UrlEncode(Buffer.from(mime, 'utf-8')) }
-//         });
-//
-//         // Mark as emailed (idempotency checkpoint)
-//         await prisma.invoice.update({
-//             where: { id: invoiceId },
-//             data: { invoiceEmailSentAt: new Date() }
-//         });
-//
-//         return { ok: true, to };
-//     }
-//
-//     async shareFileWithEmail(fileId: string, email: string) {
-//         // This shares the file to the email address.
-//         // For external emails, your Workspace admin policies must allow it.
-//         await this.drive.permissions.create({
-//             fileId,
-//             requestBody: {
-//                 type: 'user',
-//                 role: 'reader',
-//                 emailAddress: email
-//             },
-//             sendNotificationEmail: false
-//         });
-//     }
-//
-//     async exportInventoryToSheet(tenantId: string) {
-//         const tenant = await prisma.tenant.findUnique({ where: { id: tenantId } });
-//         if (!tenant) throw new Error('Tenant not found');
-//
-//         // Idempotency: If exported recently, you can skip.
-//         // Example: skip if exported within last 2 minutes (job retries)
-//         const last = tenant.inventoryLastExportedAt?.getTime() ?? 0;
-//         const now = Date.now();
-//         if (last && now - last < 2 * 60 * 1000) {
-//             return { skipped: true, reason: 'recently_exported', spreadsheetId: tenant.inventorySheetId ?? null };
-//         }
-//
-//         const products = await prisma.product.findMany({ where: { tenantId }, orderBy: { sku: 'asc' } });
-//         const moves = await prisma.stockMovement.findMany({ where: { tenantId } });
-//
-//         const stockMap = new Map<string, number>();
-//         for (const p of products) stockMap.set(p.id, 0);
-//
-//         for (const m of moves) {
-//             const cur = stockMap.get(m.productId) ?? 0;
-//             if (m.type === 'IN') stockMap.set(m.productId, cur + m.quantity);
-//             if (m.type === 'OUT') stockMap.set(m.productId, cur - m.quantity);
-//             if (m.type === 'ADJUST') stockMap.set(m.productId, m.quantity);
-//         }
-//
-//         let spreadsheetId = tenant.inventorySheetId ?? null;
-//         if (!spreadsheetId) {
-//             const created = await this.sheets.spreadsheets.create({
-//                 requestBody: { properties: { title: `Inventory Report - ${tenant.name}` } }
-//             });
-//
-//             spreadsheetId = created.data.spreadsheetId!;
-//             await prisma.tenant.update({
-//                 where: { id: tenantId },
-//                 data: { inventorySheetId: spreadsheetId }
-//             });
-//         }
-//
-//         const values = [
-//             ['SKU', 'Name', 'Price', 'Stock'],
-//             ...products.map((p) => [p.sku, p.name, Number(p.price).toFixed(2), String(stockMap.get(p.id) ?? 0)])
-//         ];
-//
-//         await this.sheets.spreadsheets.values.update({
-//             spreadsheetId,
-//             range: 'A1:D10000',
-//             valueInputOption: 'RAW',
-//             requestBody: { values }
-//         });
-//
-//         await prisma.tenant.update({
-//             where: { id: tenantId },
-//             data: { inventoryLastExportedAt: new Date() }
-//         });
-//
-//         return { spreadsheetId };
+//         return { spreadsheetId, sheetUrl, isNewSheet };
 //     }
 // }
