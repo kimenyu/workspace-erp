@@ -66,3 +66,6 @@ infra/docker-compose.override.yml
 .cache/
 tmp/
 temp/
+
+
+erp-system-489400-ceccc3f6470c.json
