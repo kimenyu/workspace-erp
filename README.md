@@ -1,6 +1,7 @@
-# Workspace ERP (Google Workspace–Integrated, Multi-Tenant ERP) — Backend + Worker
+# Workspace ERP — Multi-Tenant ERP Backend + Worker
 
-A production-style, multi-tenant ERP backend built in **TypeScript** with **NestJS**, **PostgreSQL**, **Prisma**, **Redis/BullMQ**, and deep **Google Workspace** integrations (**Drive, Docs, Gmail, Sheets**).  
+A production-style, multi-tenant ERP backend built in **TypeScript** with **NestJS**, **PostgreSQL**, **Prisma**, **Redis/BullMQ**, and **Google Workspace** integrations (**Sheets**) plus **in-memory PDF generation** and **Gmail SMTP** for invoice delivery.
+
 Designed as a **portfolio-grade senior project**: clean modular architecture, tenant isolation, RBAC, audit logging, background processing, and real accounting/inventory flows.
 
 ---
@@ -45,7 +46,7 @@ Designed as a **portfolio-grade senior project**: clean modular architecture, te
 - ✅ **RBAC** (roles + permissions) enforced per tenant
 - ✅ **Audit logging** for mutating requests (POST/PUT/PATCH/DELETE)
 - ✅ **Background jobs** with retries/backoff using **BullMQ**
-- ✅ **Worker service** that processes async jobs and integrates with Google Workspace
+- ✅ **Worker service** for async job processing
 
 ### ERP Modules
 - ✅ CRM: **Customers**
@@ -55,21 +56,14 @@ Designed as a **portfolio-grade senior project**: clean modular architecture, te
 - ✅ Accounting: **Double-entry ledger** (Chart of Accounts, Journal Entries/Lines)
 - ✅ FIFO inventory valuation + COGS on sales
 
-### Google Workspace Integrations
-- ✅ Create tenant Drive folder automatically
-- ✅ Generate invoices from a **Google Docs template** and export to **PDF**
-- ✅ Send invoice emails via **Gmail API** (supports PDF attachments)
-- ✅ Export inventory report to **Google Sheets**
-- ✅ Optional Drive sharing of invoice PDFs to customer email (configurable)
+### Integrations
+- ✅ **Invoice PDF generation** in-memory using **pdfkit** (no external storage required)
+- ✅ **Invoice email delivery** via **Gmail SMTP** (nodemailer + App Password)
+- ✅ **Inventory export** to **Google Sheets** via service account
 
 ---
 
 ## Architecture
-
-This repo uses a clean split:
-
-- **API (NestJS)**: synchronous business actions + data validation + RBAC + enqueues jobs
-- **Worker**: async processing (Google Workspace tasks, exports) with retries and idempotency
 
 ```
 Clients (Web / Mobile / Internal)
@@ -84,7 +78,8 @@ PostgreSQL     Redis (BullMQ)
   ^              |
   |              v
   +-------- Worker (apps/worker) --------+
-           | Drive/Docs/Gmail/Sheets     |
+           | pdfkit + nodemailer         |
+           | Google Sheets               |
            +-----------------------------+
 ```
 
@@ -92,17 +87,16 @@ PostgreSQL     Redis (BullMQ)
 
 ## Tech Stack
 
-- **TypeScript**
-- **NestJS** (API framework)
-- **PostgreSQL** (source of truth)
-- **Prisma** (schema/migrations, typed data access)
-- **Redis + BullMQ** (queues, background jobs)
-- **Google APIs** via `googleapis`:
-  - Drive API
-  - Docs API
-  - Gmail API
-  - Sheets API
-- **Docker Compose** for local Postgres + Redis
+| Layer | Technology |
+|-------|-----------|
+| Language | TypeScript |
+| API Framework | NestJS |
+| Database | PostgreSQL + Prisma v7 |
+| Queue | Redis + BullMQ |
+| PDF Generation | pdfkit (in-memory) |
+| Email | nodemailer (Gmail SMTP) |
+| Sheets Export | googleapis (Google Sheets API) |
+| Local Infra | Docker Compose |
 
 ---
 
@@ -124,14 +118,18 @@ workspace-erp/
         accounting/      # chart of accounts + journal entries
         reports/         # reporting endpoints
         integrations/
-          google/         # Drive/Docs/Gmail/Sheets integration
-        jobs/            # BullMQ queue enqueueing
+          google/        # Sheets integration + job enqueueing
+        jobs/            # BullMQ queue producer
       prisma/
         schema.prisma    # single source schema
-    worker/              # BullMQ processors + Google actions + DB access (Prisma)
+        prisma.config.ts # Prisma v7 datasource config
+    worker/              # BullMQ processors
       src/
         db/
-        google*.ts
+          prisma.ts      # lazy PrismaClient with pg adapter
+        env.ts           # loads .env before any imports
+        google.auth.ts   # Google service account JWT auth
+        google.erp.worker.ts  # PDF gen + email + Sheets export
         main.ts
   infra/
     docker-compose.yml   # postgres + redis
@@ -145,24 +143,23 @@ workspace-erp/
 
 ### API-side (apps/api)
 - `auth`: register/login/refresh/logout
-- `tenancy`: resolves tenant via `X-Tenant-Id` or subdomain
-- `rbac`: per-tenant roles + permissions
+- `tenancy`: resolves tenant via `X-Tenant-Id` header or subdomain
+- `rbac`: per-tenant roles + permissions guard
 - `audit`: interceptor logs mutating requests
 - `inventory`: products, stock movements, FIFO cost layers
 - `purchasing`: suppliers, purchase orders (approve/receive)
 - `sales`: customers, invoices, payments
 - `accounting`: chart of accounts, journal entries/lines
 - `reports`: inventory valuation, sales summary
-- `integrations/google`: enqueue exports, Google template processing support
+- `integrations/google`: enqueue exports
 - `jobs`: BullMQ queue producer
 
 ### Worker-side (apps/worker)
-- Connects to Postgres via Prisma
+- Connects to Postgres via Prisma (using `@prisma/adapter-pg`)
 - Processes BullMQ jobs:
-  - `invoice.send`
-  - `inventory.export`
-- Runs Google Drive/Docs/Gmail/Sheets operations
-- Uses idempotency checks to avoid duplicates on retries
+    - `invoice.send` — generate PDF in-memory + send via Gmail SMTP
+    - `inventory.export` — update Google Sheets inventory report
+- Idempotency checks prevent duplicate emails/exports on retries
 
 ---
 
@@ -171,11 +168,9 @@ workspace-erp/
 Tenant isolation is enforced by:
 
 - A `tenantId` column on all business entities
-- Tenant resolved per request using:
-  - `X-Tenant-Id` header (**dev/test**), OR
-  - subdomain on `Host` header (**production**): `acme.yourapp.com` → tenant slug `acme`
-
-> Recommendation: in production, prefer subdomains for clean tenant routing and remove `X-Tenant-Id` from public clients.
+- Tenant resolved per request via:
+    - `X-Tenant-Id` header (dev/test)
+    - subdomain on `Host` header (production): `acme.yourapp.com` → slug `acme`
 
 ---
 
@@ -183,11 +178,11 @@ Tenant isolation is enforced by:
 
 ### JWT Access + Refresh Sessions
 - Access tokens are standard JWTs (`Authorization: Bearer <token>`)
-- Refresh tokens are strong random values stored in `Session` table
-- Refresh rotates the token in DB (invalidates old token)
+- Refresh tokens are random values stored in `Session` table
+- Refresh rotates the token in DB (invalidates the old one)
 
-### Worker Secret (optional hardening)
-Some endpoints can be gated by `X-Worker-Secret` to reduce blast radius.
+### Worker Secret (optional)
+Internal endpoints can be gated by `X-Worker-Secret` for extra hardening.
 
 ---
 
@@ -196,11 +191,11 @@ Some endpoints can be gated by `X-Worker-Secret` to reduce blast radius.
 RBAC is tenant-scoped:
 
 - `Role` belongs to a `tenantId`
-- `Permission` is global (`key` string like `inventory.write`)
+- `Permission` is global (e.g. `inventory.write`)
 - `RolePermission` ties role ↔ permission
 - `UserTenant` ties user ↔ tenant and assigns a role
 
-Examples:
+Example permission keys:
 - `inventory.read`, `inventory.write`
 - `sales.read`, `sales.write`
 - `purchasing.read`, `purchasing.write`
@@ -211,192 +206,202 @@ Examples:
 
 ## Audit Logging
 
-Mutating requests are automatically logged:
+Mutating requests are automatically logged via `AuditInterceptor`:
 
-- method: POST/PUT/PATCH/DELETE
-- entity (derived from controller)
-- actorId
-- metadata (path, body keys)
+- HTTP method (POST/PUT/PATCH/DELETE)
+- URL entity path
+- actorId (from JWT)
+- tenantId (from request)
 
-Stored in `AuditLog`.
+Stored in `AuditLog` table.
 
 ---
 
 ## Inventory
 
-Inventory is event-based:
+Inventory is event-sourced:
 
 - `Product` is the catalog
-- `StockMovement` records IN/OUT/ADJUST
-- Stock level can be computed from movements
-- FIFO valuation uses **cost layers** created from PO receipts
+- `StockMovement` records IN/OUT/ADJUST events
+- Stock level is computed from movements
+- FIFO valuation uses cost layers created at PO receipt
 
 ---
 
 ## Purchasing
 
-Purchasing flow:
-
 1. Create `Supplier`
 2. Create `PurchaseOrder` with `PurchaseOrderLine`s
 3. Approve PO
 4. Receive PO:
-   - adds `StockMovement IN` for each line
-   - adds FIFO `InventoryCostLayer` per received line
-   - marks PO `RECEIVED`
+    - adds `StockMovement IN` per line
+    - creates FIFO `InventoryCostLayer` per line
+    - marks PO `RECEIVED`
 
 ---
 
 ## Sales
 
-Sales flow:
-
 1. Create `Customer`
 2. Create `Invoice` (DRAFT) with line items
 3. Mark invoice **SENT**:
-   - creates `StockMovement OUT` for product lines
-   - consumes FIFO layers and records `CogsEntry`
-   - enqueues Google job to generate & send invoice
-4. Create `Payment`:
-   - posts a double-entry journal entry (Cash/AR)
-   - auto-marks invoice `PAID` once paid >= total
+    - creates `StockMovement OUT` per product line
+    - consumes FIFO layers and records `CogsEntry` rows
+    - enqueues `invoice.send` job
+4. Worker processes job:
+    - generates PDF in-memory with pdfkit
+    - emails PDF to customer via Gmail SMTP
+5. Create `Payment`:
+    - posts double-entry journal entry (Cash/AR)
+    - auto-marks invoice `PAID` when paid >= total
 
 ---
 
 ## FIFO Valuation & COGS
 
 ### FIFO Cost Layers
-- Created at stock receipt time (PO receiving)
+- Created at PO receipt time
 - Stored in `InventoryCostLayer` with `remainingQty` and `unitCost`
-- Consumed oldest-first when invoicing stock OUT
+- Consumed oldest-first when processing stock OUT on invoicing
 
 ### COGS
 - Each consumption creates `CogsEntry` rows
-- Used for reports and gross profit calculations
+- Used for gross profit reporting
 
 ---
 
 ## Accounting (Double-Entry)
 
 Models:
-- `Account` (chart of accounts)
-- `JournalEntry` (header)
-- `JournalLine` (debit/credit lines)
+- `Account` (chart of accounts, seeded on tenant creation)
+- `JournalEntry` (transaction header)
+- `JournalLine` (debit/credit lines using `Decimal`)
 
 Example: invoice payment
 - Debit **Cash** (1000)
 - Credit **Accounts Receivable** (1100)
-
-> This is the foundation for a full accounting engine (GL balances, trial balance, etc.).
 
 ---
 
 ## Google Workspace Integrations
 
 ### What it does
-- Creates a Drive folder per tenant (persisted in `Tenant.googleDriveFolderId`)
-- Copies a **Google Docs invoice template** per invoice
-- Replaces placeholders and exports as PDF
-- Uploads PDF to tenant folder (persisted in `Invoice.drivePdfFileId`)
-- Emails invoice via Gmail (optionally with PDF attachment)
-- Exports inventory report to Sheets (persisted in `Tenant.inventorySheetId`)
+| Feature | Implementation |
+|---------|---------------|
+| Invoice PDF | Generated in-memory with **pdfkit** |
+| Invoice email | Sent via **Gmail SMTP** (nodemailer + App Password) |
+| Inventory export | Written to **Google Sheets** via service account |
 
-### Invoice Template Placeholders
-Create a Google Doc template and include these placeholders exactly:
+### Google Service Account Setup
+The worker uses a Google service account for Sheets access only. No domain-wide delegation or impersonation is required.
 
-```
-INVOICE
-Invoice ID: {{INVOICE_ID}}
-Date: {{DATE}}
-Status: {{STATUS}}
+1. Create a service account in [Google Cloud Console](https://console.cloud.google.com)
+2. Download the JSON key file
+3. Extract `client_email` and `private_key` into `.env`
+4. Share any target Sheets with the service account email
 
-Bill To:
-{{CUSTOMER_NAME}}
-{{CUSTOMER_EMAIL}}
+### Gmail Setup (for invoice email)
+Since the worker uses a personal Gmail account via SMTP App Password:
 
-Items:
-{{LINES}}
+1. Enable 2-Step Verification on your Google account
+2. Go to Google Account → Security → App passwords
+3. Generate a password for "Mail"
+4. Add `GMAIL_USER` and `GMAIL_APP_PASSWORD` to `.env`
 
-Total: {{TOTAL}}
-```
-
-Set `GOOGLE_INVOICE_TEMPLATE_DOC_ID` to the template file ID.
-
-### Sharing Strategy
-- Default: files remain within Workspace (org access policies apply)
-- Optional: share invoice PDF to the customer email (`SHARE_INVOICE_PDF_WITH_CUSTOMER=true`)
+> **Note:** Gmail App Passwords work with personal Gmail accounts. Domain-wide delegation (Gmail API) requires Google Workspace.
 
 ---
 
 ## Background Jobs
 
-Queues:
-- `google`
+Queues: `google`
 
-Jobs:
-- `invoice.send` — generate invoice PDF + email
-- `inventory.export` — update tenant inventory sheet
+| Job | Trigger | What it does |
+|-----|---------|-------------|
+| `invoice.send` | Mark invoice SENT | Generate PDF → email to customer |
+| `inventory.export` | Manual/scheduled | Write inventory to Google Sheets |
 
-Jobs use:
-- retries
-- exponential backoff
-- idempotency checks (avoid duplicate emails/PDFs)
+All jobs have:
+- Automatic retries with exponential backoff
+- Idempotency checks (won't re-send already-sent invoices)
 
 ---
 
 ## Reports
 
-Endpoints:
-- `GET /reports/inventory/valuation` — total inventory valuation (FIFO remaining layers)
+- `GET /reports/inventory/valuation` — total inventory value (FIFO remaining layers)
 - `GET /reports/sales/summary?from=YYYY-MM-DD&to=YYYY-MM-DD` — revenue, COGS, gross profit
 
 ---
 
 ## Local Development Setup
 
-### Prereqs
-- Node.js 18+ (or 20+)
+### Prerequisites
+- Node.js 20+
 - pnpm 9+
 - Docker + Docker Compose
-- A Google Workspace environment (for full integration) with admin access if using domain-wide delegation
 
-### Start Postgres + Redis
+### 1. Start Postgres + Redis
 ```bash
 docker compose -f infra/docker-compose.yml up -d
 ```
 
-### Install deps
-From repo root:
+### 2. Install dependencies
 ```bash
-pnpm -r install
+pnpm install
+```
+
+### 3. Set up environment
+```bash
+cp .env.example .env
+# Edit .env with your values
+```
+
+### 4. Copy .env to each app (required for Prisma and runtime)
+```bash
+cp .env apps/api/.env
+cp .env apps/worker/.env
+```
+
+### 5. Run migrations
+```bash
+cd apps/api
+pnpm prisma:migrate
+pnpm prisma:generate
 ```
 
 ---
 
 ## Environment Variables
 
-Copy `.env.example` → `.env` and fill values.
+```env
+# App
+NODE_ENV=development
+API_PORT=4000
 
-Core:
-- `API_PORT`
-- `DATABASE_URL`
-- `REDIS_URL`
-- `JWT_ACCESS_SECRET`
-- `JWT_REFRESH_SECRET`
-- `JWT_ACCESS_EXPIRES_IN`
-- `JWT_REFRESH_EXPIRES_IN`
+# Database
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/erp
 
-Google:
-- `GOOGLE_PROJECT_ID`
-- `GOOGLE_CLIENT_EMAIL`
-- `GOOGLE_PRIVATE_KEY` (use `\n` for newlines)
-- `GOOGLE_IMPERSONATE_USER_EMAIL`
-- `GOOGLE_DRIVE_ROOT_FOLDER_ID` (optional)
-- `GOOGLE_INVOICE_TEMPLATE_DOC_ID`
+# Redis
+REDIS_URL=redis://localhost:6379
 
-Security flags:
-- `WORKER_SECRET` (optional endpoint hardening)
-- `SHARE_INVOICE_PDF_WITH_CUSTOMER=false|true`
+# JWT
+JWT_ACCESS_SECRET=change_me
+JWT_REFRESH_SECRET=change_me
+JWT_ACCESS_EXPIRES_IN=15m
+JWT_REFRESH_EXPIRES_IN=14d
+
+# Gmail SMTP (for invoice emails)
+GMAIL_USER=yourname@gmail.com
+GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx
+
+# Google Service Account (for Sheets export)
+GOOGLE_CLIENT_EMAIL=your-sa@your-project.iam.gserviceaccount.com
+GOOGLE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+
+# Optional
+WORKER_SECRET=change_me
+```
 
 ---
 
@@ -404,32 +409,36 @@ Security flags:
 
 From `apps/api`:
 ```bash
-pnpm prisma:generate
-pnpm prisma:migrate
+pnpm prisma:migrate        # run migrations
+pnpm prisma:generate       # regenerate Prisma client
+pnpm prisma:studio         # open Prisma Studio
 ```
 
-> The worker generates Prisma client from the same schema using:
-> `pnpm prisma:generate --schema ../api/prisma/schema.prisma`
+The worker generates its Prisma client from the same schema:
+```bash
+cd apps/worker
+pnpm prisma:generate       # uses --schema ../api/prisma/schema.prisma
+```
 
 ---
 
 ## Run the System
 
-### Terminal 1 — API
+### Terminal 1 — Infra
+```bash
+docker compose -f infra/docker-compose.yml up -d
+```
+
+### Terminal 2 — API
 ```bash
 cd apps/api
 pnpm dev
 ```
 
-### Terminal 2 — Worker
+### Terminal 3 — Worker
 ```bash
 cd apps/worker
 pnpm dev
-```
-
-### Terminal 3 — Infra (if not running)
-```bash
-docker compose -f infra/docker-compose.yml up -d
 ```
 
 ---
@@ -441,18 +450,15 @@ docker compose -f infra/docker-compose.yml up -d
 curl -X POST http://localhost:4000/auth/register \
   -H "Content-Type: application/json" \
   -d '{
-    "email":"admin@acme.com",
-    "password":"Passw0rd!!",
-    "fullName":"Acme Admin",
-    "tenantName":"Acme Ltd",
-    "tenantSlug":"acme"
+    "email": "admin@acme.com",
+    "password": "Passw0rd!!",
+    "fullName": "Acme Admin",
+    "tenantName": "Acme Ltd",
+    "tenantSlug": "acme"
   }'
 ```
 
-Copy:
-- `tenant.id` → `TENANT_ID`
-- `tokens.accessToken` → `TOKEN`
-
+Copy `tenant.id` → `TENANT_ID` and `tokens.accessToken` → `TOKEN`:
 ```bash
 export TENANT_ID="<tenant_uuid>"
 export TOKEN="<access_token>"
@@ -476,49 +482,49 @@ curl -X POST http://localhost:4000/sales/customers \
   -d '{"name":"Jane Doe","email":"jane@example.com"}'
 ```
 
-### 4) Purchasing: supplier → PO → approve → receive (creates FIFO layers)
+### 4) Purchasing: supplier → PO → approve → receive
 ```bash
-# supplier
+# Create supplier
 curl -X POST http://localhost:4000/purchasing/suppliers \
   -H "Content-Type: application/json" \
   -H "X-Tenant-Id: $TENANT_ID" \
   -H "Authorization: Bearer $TOKEN" \
   -d '{"name":"Supplier Inc","email":"supplier@example.com"}'
 
-# create PO (replace IDs)
+# Create PO
 curl -X POST http://localhost:4000/purchasing/pos \
   -H "Content-Type: application/json" \
   -H "X-Tenant-Id: $TENANT_ID" \
   -H "Authorization: Bearer $TOKEN" \
   -d '{
-    "supplierId":"<supplier_id>",
-    "lines":[{"productId":"<product_id>","name":"Mouse","qty":10,"unitCost":8}]
+    "supplierId": "<supplier_id>",
+    "lines": [{"productId":"<product_id>","name":"Mouse","qty":10,"unitCost":8}]
   }'
 
-# approve
+# Approve
 curl -X POST http://localhost:4000/purchasing/pos/<po_id>/approve \
   -H "X-Tenant-Id: $TENANT_ID" \
   -H "Authorization: Bearer $TOKEN"
 
-# receive (adds stock IN + FIFO layer)
+# Receive (creates StockMovement IN + FIFO cost layer)
 curl -X POST http://localhost:4000/purchasing/pos/<po_id>/receive \
   -H "X-Tenant-Id: $TENANT_ID" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-### 5) Create invoice (DRAFT) referencing the product
+### 5) Create invoice (DRAFT)
 ```bash
 curl -X POST http://localhost:4000/sales/invoices \
   -H "Content-Type: application/json" \
   -H "X-Tenant-Id: $TENANT_ID" \
   -H "Authorization: Bearer $TOKEN" \
   -d '{
-    "customerId":"<customer_id>",
-    "lines":[{"productId":"<product_id>","name":"Mouse","qty":2,"unitPrice":15}]
+    "customerId": "<customer_id>",
+    "lines": [{"productId":"<product_id>","name":"Mouse","qty":2,"unitPrice":15}]
   }'
 ```
 
-### 6) Mark invoice SENT (stock OUT + FIFO consume + enqueue Google send)
+### 6) Mark invoice SENT
 ```bash
 curl -X POST http://localhost:4000/sales/invoices/<invoice_id>/sent \
   -H "X-Tenant-Id: $TENANT_ID" \
@@ -526,11 +532,10 @@ curl -X POST http://localhost:4000/sales/invoices/<invoice_id>/sent \
 ```
 
 Worker will:
-- generate Docs → PDF
-- upload to Drive
-- send Gmail (optionally attach PDF)
+- Generate invoice PDF in-memory (pdfkit)
+- Email PDF to customer via Gmail SMTP
 
-### 7) Record payment (posts journal entry and may mark PAID)
+### 7) Record payment
 ```bash
 curl -X POST http://localhost:4000/sales/payments \
   -H "Content-Type: application/json" \
@@ -541,11 +546,11 @@ curl -X POST http://localhost:4000/sales/payments \
 
 ### 8) Reports
 ```bash
-curl -X GET http://localhost:4000/reports/inventory/valuation \
+curl http://localhost:4000/reports/inventory/valuation \
   -H "X-Tenant-Id: $TENANT_ID" \
   -H "Authorization: Bearer $TOKEN"
 
-curl -X GET "http://localhost:4000/reports/sales/summary?from=2026-01-01&to=2026-12-31" \
+curl "http://localhost:4000/reports/sales/summary?from=2026-01-01&to=2026-12-31" \
   -H "X-Tenant-Id: $TENANT_ID" \
   -H "Authorization: Bearer $TOKEN"
 ```
@@ -554,7 +559,7 @@ curl -X GET "http://localhost:4000/reports/sales/summary?from=2026-01-01&to=2026
 
 ## Scheduling Nightly Exports
 
-Schedule nightly inventory export to Google Sheets:
+Trigger a nightly inventory export to Google Sheets:
 
 ```bash
 curl -X POST http://localhost:4000/google/inventory/schedule-nightly \
@@ -562,68 +567,69 @@ curl -X POST http://localhost:4000/google/inventory/schedule-nightly \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-> You may want to restrict this endpoint to admin-only permissions.
-
 ---
 
 ## Deployment Notes
 
-### Recommended production topology
-- `api` (NestJS) behind a load balancer
-- `worker` (BullMQ processors) as a separate service
-- `postgres` managed (RDS/Cloud SQL)
-- `redis` managed (Elasticache/MemoryStore)
+### Recommended topology
+- `api` behind a load balancer
+- `worker` as a separate service (scale independently)
+- `postgres` managed (RDS / Cloud SQL)
+- `redis` managed (Elasticache / MemoryStore)
 
 ### Tenant routing
-- Use subdomains: `tenantSlug.yourdomain.com`
-- Put tenant slug resolution behind a proxy that preserves `Host`
+- Subdomains: `tenantSlug.yourdomain.com`
+- Preserve `Host` header through your proxy
 
 ### Secrets
-- Store Google keys in a secret manager (GCP Secret Manager, AWS Secrets Manager, etc.)
+- Store Google private key in a secret manager (GCP Secret Manager, AWS Secrets Manager)
 - Rotate JWT secrets periodically
+- Never commit `.env` to version control
 
 ### Idempotency
-- Invoice generation checks `drivePdfFileId`
-- Email send checks `invoiceEmailSentAt`
-- Inventory export checks recent export timestamps
+- Invoice email: checked via `invoiceEmailSentAt`
+- Inventory export: checked via `inventoryLastExportedAt` (skips if exported within 2 minutes)
 
 ---
 
 ## Troubleshooting
 
-### “Missing X-Tenant-Id header”
-- Provide `X-Tenant-Id` in requests, or run behind a subdomain like `acme.localhost`.
+### "Missing X-Tenant-Id header"
+Provide the `X-Tenant-Id` header on all business requests, or configure subdomain routing.
 
-### Google errors / permission issues
-- Ensure your Workspace admin has approved scopes for domain-wide delegation
-- Ensure `GOOGLE_IMPERSONATE_USER_EMAIL` is a real user in the Workspace
-- Confirm the template doc ID is correct
-- If sharing to external emails fails, it may be blocked by Workspace sharing policies
+### Gmail send fails
+- Verify `GMAIL_USER` and `GMAIL_APP_PASSWORD` are set correctly
+- App Password must be generated from Google Account → Security → 2-Step Verification → App passwords
+- App Passwords only work if 2FA is enabled
+
+### Google Sheets export fails
+- Verify `GOOGLE_CLIENT_EMAIL` and `GOOGLE_PRIVATE_KEY` are correct
+- Ensure the service account has access to the target spreadsheet (share it with the service account email)
 
 ### Worker not processing jobs
 - Confirm Redis is running: `docker ps`
-- Confirm worker is running and connected to same `REDIS_URL`
-- Check worker logs for job failures
+- Confirm worker is running and connected to the same `REDIS_URL`
+- Check worker logs for job failure details
 
-### Prisma client mismatch
-- Ensure `apps/worker` runs `pnpm prisma:generate --schema ../api/prisma/schema.prisma`
+### Prisma client errors
+- Ensure both apps have `.env` copied locally (Prisma reads from the nearest `.env`)
+- Re-run `pnpm prisma:generate` after any schema changes
+- For Prisma v7: `@prisma/adapter-pg` is required — do not use bare `new PrismaClient()`
 
 ---
 
 ## Roadmap
 
-Potential next upgrades to make this enterprise-grade:
 - Swagger/OpenAPI docs + request/response schemas
 - Multi-tenant rate limiting and per-tenant quotas
 - Invoices: taxes, discounts, payment terms, numbering sequences
 - Accounting: AR/AP aging, trial balance, financial statements
 - Inventory: multi-warehouse, transfers, serial/batch tracking
-- Google: templated PDF emails, customer portal, signed URLs
 - Observability: structured logging, tracing, metrics dashboards
-- CI/CD: automated migrations, docker builds, blue/green deploys
+- CI/CD: automated migrations, Docker builds, blue/green deploys
 
 ---
 
 ## License
 
-MIT (or replace with your preferred license).
+MIT
