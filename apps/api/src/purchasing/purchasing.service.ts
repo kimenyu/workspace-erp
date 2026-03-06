@@ -7,7 +7,11 @@ import { FifoService } from '../inventory/fifo.service';
 
 @Injectable()
 export class PurchasingService {
-    constructor(private readonly prisma: PrismaService) {}
+    // constructor
+    constructor(
+        private readonly prisma: PrismaService,
+        private readonly fifo: FifoService
+    ) {}
 
     createSupplier(tenantId: string, dto: CreateSupplierDto) {
         return this.prisma.supplier.create({
@@ -75,11 +79,7 @@ export class PurchasingService {
     }
 
 
-// constructor
-constructor(
-    private readonly prisma: PrismaService,
-    private readonly fifo: FifoService
-) {}
+
 
 // method
 async receivePO(tenantId: string, poId: string) {
