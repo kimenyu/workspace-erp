@@ -2,7 +2,7 @@
 
 A production-style, multi-tenant ERP backend built in **TypeScript** with **NestJS**, **PostgreSQL**, **Prisma**, **Redis/BullMQ**, and **Google Workspace** integrations (**Sheets**) plus **in-memory PDF generation** and **Gmail SMTP** for invoice delivery.
 
-Designed as a **portfolio-grade senior project**: clean modular architecture, tenant isolation, RBAC, audit logging, background processing, and real accounting/inventory flows.
+Design : clean modular architecture, tenant isolation, RBAC, audit logging, background processing, and real accounting/inventory flows.
 
 ---
 
