@@ -41,25 +41,25 @@ Designed as a **portfolio-grade senior project**: clean modular architecture, te
 ## Key Features
 
 ### Platform
-- ✅ **Multi-tenant architecture** with strict tenant scoping (`tenantId` on all business tables)
-- ✅ **JWT auth** (access tokens) + **refresh tokens** stored as DB sessions
-- ✅ **RBAC** (roles + permissions) enforced per tenant
-- ✅ **Audit logging** for mutating requests (POST/PUT/PATCH/DELETE)
-- ✅ **Background jobs** with retries/backoff using **BullMQ**
-- ✅ **Worker service** for async job processing
+-  **Multi-tenant architecture** with strict tenant scoping (`tenantId` on all business tables)
+-  **JWT auth** (access tokens) + **refresh tokens** stored as DB sessions
+-  **RBAC** (roles + permissions) enforced per tenant
+-  **Audit logging** for mutating requests (POST/PUT/PATCH/DELETE)
+-  **Background jobs** with retries/backoff using **BullMQ**
+- **Worker service** for async job processing
 
 ### ERP Modules
-- ✅ CRM: **Customers**
-- ✅ Inventory: **Products**, **Stock Movements**, stock levels
-- ✅ Purchasing: **Suppliers**, **Purchase Orders**, approve/receive
-- ✅ Sales: **Invoices**, invoice lines, mark SENT/PAID
-- ✅ Accounting: **Double-entry ledger** (Chart of Accounts, Journal Entries/Lines)
-- ✅ FIFO inventory valuation + COGS on sales
+-  CRM: **Customers**
+-  Inventory: **Products**, **Stock Movements**, stock levels
+-  Purchasing: **Suppliers**, **Purchase Orders**, approve/receive
+-  Sales: **Invoices**, invoice lines, mark SENT/PAID
+-  Accounting: **Double-entry ledger** (Chart of Accounts, Journal Entries/Lines)
+-  FIFO inventory valuation + COGS on sales
 
 ### Integrations
-- ✅ **Invoice PDF generation** in-memory using **pdfkit** (no external storage required)
-- ✅ **Invoice email delivery** via **Gmail SMTP** (nodemailer + App Password)
-- ✅ **Inventory export** to **Google Sheets** via service account
+-  **Invoice PDF generation** in-memory using **pdfkit** (no external storage required)
+-  **Invoice email delivery** via **Gmail SMTP** (nodemailer + App Password)
+-  **Inventory export** to **Google Sheets** via service account
 
 ---
 
