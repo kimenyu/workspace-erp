@@ -1,6 +1,6 @@
 # Workspace ERP — Multi-Tenant ERP Backend + Worker
 
-A production-style, multi-tenant ERP backend built in **TypeScript** with **NestJS**, **PostgreSQL**, **Prisma**, **Redis/BullMQ**, and **Google Workspace** integrations (**Sheets**) plus **in-memory PDF generation** and **Gmail SMTP** for invoice delivery.
+A production-style, multi-tenant ERP backend built in **TypeScript** with **NestJS**, **PostgreSQL**, **Prisma**, **Redis/BullMQ**, and **Google Workspace** integrations (**Sheets**) plus **in-memory PDF generation** and **Gmail SMTP** for invoice delivery. You can find the frontend here:  [Workspace ERP Frontend](https://github.com/kimenyu/workspace-erp-frontend)
 
 Design : clean modular architecture, tenant isolation, RBAC, audit logging, background processing, and real accounting/inventory flows.
 
